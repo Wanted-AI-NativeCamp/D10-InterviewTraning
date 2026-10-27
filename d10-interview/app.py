@@ -3,7 +3,7 @@ import streamlit as st
 
 import coach
 from llm import LLMError, ask_json
-from prompts import EVAL_SCHEMA, INTERVIEWER_SCHEMA, PERSONAS
+from prompts import EVAL_SCHEMA, INTERVIEWER_SCHEMA, PERSONAS, RETRY_SCHEMA
 
 st.set_page_config(page_title="AI 면접 코치", page_icon="🎤")
 
@@ -86,6 +86,7 @@ if state.stage == "start":
                 state.follow_ups = 0
                 state.understanding = None
                 state.evaluation = None
+                state.retries = {}
                 state.messages = [
                     {"role": "assistant", "content": f"{name} 님, 면접을 시작하겠습니다."},
                     question_message(0),
@@ -134,9 +135,50 @@ def show_evaluation(ev: dict):
     st.subheader("다음 연습에서 고칠 것")
     for item in ev["next"]:
         st.markdown(f"- {item}")
+    st.caption("🔁 재도전 탭에서 점수가 낮은 질문에 다시 답해 볼 수 있어요.")
 
 
-CHAT_TAB, EVAL_TAB = "💬 면접", "📊 평가"
+def show_retry(ev: dict):
+    ordered = coach.retry_order(ev["answers"])
+    labels = {a["no"]: f"질문 {a['no']} · {a['score']}/{coach.ANSWER_MAX}점 · {a['question']}" for a in ordered}
+    no = st.selectbox("다시 답할 질문 (점수 낮은 순)", list(labels), format_func=labels.get, key="retry_no")
+    last = next(a for a in ordered if a["no"] == no)
+    question = state.questions[no - 1]
+    before = coach.answer_text(state.messages, no - 1)
+
+    st.metric("지난 점수", f"{last['score']}/{coach.ANSWER_MAX}")
+    st.markdown(f"**지난 약한 점:** {last['weak']}")
+    with st.expander("지난 답 보기"):
+        st.write(before or "(답 없음)")
+
+    new_answer = st.text_area("다시 답하기", height=180, key=f"retry_answer_{no}")
+    if st.button("다시 채점", type="primary"):
+        if not new_answer.strip():
+            st.info("다시 쓴 답을 적은 뒤 눌러 주세요.")
+        else:
+            try:
+                with st.spinner("다시 쓴 답을 채점하고 있어요..."):
+                    raw = ask_json(
+                        coach.build_retry(profile, question, before, last["weak"]),
+                        new_answer.strip(),
+                        RETRY_SCHEMA,
+                        "retry",
+                    )
+            except LLMError as e:
+                st.error(str(e))
+            else:
+                state.retries[no] = {"answer": new_answer.strip(), **coach.summarize_retry(raw)}
+                st.rerun()
+
+    result = state.retries.get(no)
+    if result:
+        diff = coach.compare(last["scores"], result["scores"])
+        st.metric("후 점수", f"{diff['after']}/{coach.ANSWER_MAX}", delta=diff["diff"])
+        st.dataframe(diff["rows"], hide_index=True)
+        st.markdown(f"**이번 답의 약한 점:** {result['weak']}")
+
+
+CHAT_TAB, EVAL_TAB, RETRY_TAB = "💬 면접", "📊 평가", "🔁 재도전"
 
 # 탭을 바꾸라는 표시가 있으면, 탭을 그리기 전에 열 탭을 정한다 (그린 뒤에는 바꿀 수 없음).
 if state.pop("go_eval", False):
@@ -144,7 +186,7 @@ if state.pop("go_eval", False):
 
 # 탭은 면접 시작부터 항상 같은 모양 · 같은 key 로 둔다. 화면 구조가 바뀌면
 # Streamlit이 대화를 다시 그리면서 스크롤이 맨 위로 올라가기 때문이다.
-chat_tab, eval_tab = st.tabs([CHAT_TAB, EVAL_TAB], key="view", on_change="rerun")
+chat_tab, eval_tab, retry_tab = st.tabs([CHAT_TAB, EVAL_TAB, RETRY_TAB], key="view", on_change="rerun")
 
 with chat_tab:
     show_messages()
@@ -180,7 +222,19 @@ with eval_tab:
     else:
         st.info("질문 5개를 마치면 위원 4명에게 평가받을 수 있어요.")
 
+with retry_tab:
+    if state.evaluation:
+        show_retry(state.evaluation)
+    else:
+        st.info("위원 4명에게 평가받은 뒤, 점수가 낮은 질문부터 다시 답해 볼 수 있어요.")
+
+# 면접이 끝나도 입력창은 그대로 둔다. 화면 맨 아래 고정된 입력창이 사라지면
+# 페이지 높이가 바뀌면서 스크롤이 위로 튀기 때문이다.
 if state.stage == "done":
+    if st.chat_input("면접이 끝났어요. 위원 4명에게 평가받아 보세요.") is not None:
+        next_button = "📊 평가 확인하기" if state.evaluation else "위원 4명에게 평가받기"
+        with live:
+            st.info(f"면접은 끝났어요. '{next_button}' 버튼을 눌러 주세요.")
     st.stop()
 
 answer = st.chat_input("답을 적어 주세요")

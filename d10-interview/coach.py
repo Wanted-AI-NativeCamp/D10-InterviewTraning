@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from prompts import CONTEXT, EVALUATOR, INTERVIEWER, PANEL_ROLES, PERSONAS
+from prompts import CONTEXT, EVALUATOR, INTERVIEWER, PANEL_ROLES, PERSONAS, RETRY
 
 TOTAL_QUESTIONS = 5
 MAX_FOLLOW_UPS = 1
@@ -70,6 +70,22 @@ def build_evaluator(profile: dict) -> str:
     return EVALUATOR.format(context=build_context(profile))
 
 
+def build_retry(profile: dict, question: dict, before: str, weak: str) -> str:
+    return RETRY.format(
+        persona=PERSONAS[profile["job"]],
+        context=build_context(profile),
+        question=question["question"],
+        point=question["point"],
+        before=before,
+        weak=weak,
+    )
+
+
+def answer_text(messages: list[dict], index: int) -> str:
+    """한 질문에 대한 지원자의 답(꼬리 질문 답 포함)을 이어 붙인다."""
+    return "\n".join(m["content"] for m in messages if m.get("q") == index and m["role"] == "user")
+
+
 def format_record(questions: list[dict], messages: list[dict]) -> str:
     """면접 기록을 질문별로 묶는다. 메시지의 'q' 는 질문 번호(0부터)."""
     names = {"assistant": "면접관", "user": "지원자"}
@@ -116,6 +132,30 @@ def answer_score(scores: dict) -> int:
     return sum(scores[key] for key in CRITERIA)
 
 
+def clamp_scores(raw: dict) -> dict:
+    return {key: clamp(raw.get(key), 0, CRITERION_MAX) for key in CRITERIA}
+
+
+def retry_order(answers: list[dict]) -> list[dict]:
+    """재도전할 질문을 답변 점수가 낮은 순으로 (같으면 질문 번호 순)."""
+    return sorted(answers, key=lambda a: (a["score"], a["no"]))
+
+
+def summarize_retry(raw: dict) -> dict:
+    scores = clamp_scores(raw)
+    return {"scores": scores, "score": answer_score(scores), "weak": str(raw.get("weak", ""))}
+
+
+def compare(before: dict, after: dict) -> dict:
+    """전 → 후 점수 차이. before · after 는 기준별 점수 dict."""
+    rows = [
+        {"기준": name, "전": before[key], "후": after[key], "차이": after[key] - before[key]}
+        for key, name in CRITERIA.items()
+    ]
+    before_score, after_score = answer_score(before), answer_score(after)
+    return {"before": before_score, "after": after_score, "diff": after_score - before_score, "rows": rows}
+
+
 def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
     """AI 평가를 범위 안으로 자르고, 평균 · 합계는 여기서 다시 계산한다."""
     by_role = {m.get("role"): m for m in raw.get("panel", [])}
@@ -135,7 +175,7 @@ def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
     for i, q in enumerate(questions):
         # 질문 번호(no, 1부터)로 찾고, 없으면 순서로 찾는다.
         a = by_number.get(i + 1) or (raw_answers[i] if i < len(raw_answers) else {})
-        scores = {key: clamp(a.get(key), 0, CRITERION_MAX) for key in CRITERIA}
+        scores = clamp_scores(a)
         score = answer_score(scores)
         answers.append({
             "no": i + 1,

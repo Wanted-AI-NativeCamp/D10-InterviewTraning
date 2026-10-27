@@ -53,7 +53,38 @@ EVALUATOR = """너는 모의면접 평가 위원회야. 아래 면접 기록을 
 5. next 에 다음 연습에서 고칠 것 3개.
 출력은 JSON 하나만. 점수 합계는 쓰지 마 (앱이 계산해)."""
 
-PANEL_ROLES = ["실무 전문가", "논리 분석가", "커뮤니케이션 전문가", "채용 담당자"]
+# 재도전 채점 지시문. {persona} {context} {question} {point} {before} {weak} 는 앱이 채운다.
+# 다시 쓴 답은 user_input 으로 넘긴다.
+RETRY = """너는 모의면접 채점자야. 지원자가 같은 질문에 다시 쓴 답을 채점해.
+페르소나: {persona}
+{context}
+[질문] {question}
+[이 질문에서 보는 점] {point}
+[지난 답] {before}
+[지난 답의 약한 점] {weak}
+[규칙]
+1. 다시 쓴 답만 채점한다. 지난 답은 무엇이 바뀌었는지 비교할 때만 본다.
+2. 기준 4개(구체성 / 직무 연관 / 구조 / 근거 · 검증)를 각각 0~5점. 평가 위원회와 같은 기준으로 본다.
+3. 지난 답보다 나아졌다는 이유만으로 점수를 올리지 마. 다시 쓴 답 자체로 판단해.
+4. 다시 쓴 답에서 가장 약한 점 하나를 weak 에 1문장.
+5. 지원자가 쓰지 않은 경험 · 숫자를 사실처럼 말하지 마.
+6. weak 는 위 페르소나의 말투로 쓴다.
+출력은 JSON 하나만. 점수 합계는 쓰지 마 (앱이 계산해)."""
+
+RETRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "specific": {"type": "integer"},
+        "relevance": {"type": "integer"},
+        "structure": {"type": "integer"},
+        "evidence": {"type": "integer"},
+        "weak": {"type": "string"},
+    },
+    "required": ["specific", "relevance", "structure", "evidence", "weak"],
+    "additionalProperties": False,
+}
+
+PANEL_ROLES =["실무 전문가", "논리 분석가", "커뮤니케이션 전문가", "채용 담당자"]
 
 EVAL_SCHEMA = {
     "type": "object",
