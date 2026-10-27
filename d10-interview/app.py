@@ -1,5 +1,7 @@
 # Streamlit 화면만. 프롬프트는 prompts.py, AI 호출은 llm.py, 계산은 coach.py.
 import html
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import streamlit as st
 
@@ -19,6 +21,7 @@ from prompts import (
 )
 
 st.set_page_config(page_title="AI 면접 코치", page_icon="🎤")
+DEFAULT_TIMEZONE = "Asia/Seoul"  # 브라우저 시간대를 모를 때
 # Streamlit에는 테마를 코드로 바꾸는 공식 기능이 없어서, 기본 설정 메뉴 위치를 알려 준다.
 st.caption("🌓 다크 · 라이트 모드는 오른쪽 위 ⋮ 메뉴 → Settings 에서 바꿀 수 있어요.")
 
@@ -581,24 +584,47 @@ def show_last_question():
             st.markdown(f"**원래 질문에서 빠진 것:** {result['why']}")
 
 
+def user_now() -> datetime:
+    """사용자 브라우저 시간대의 지금 시각. 배포 서버 시계는 UTC 라서 그대로 쓰지 않는다."""
+    try:
+        tz = ZoneInfo(st.context.timezone or DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+    return datetime.now(tz)
+
+
 def show_report(ev: dict):
     try:
         precheck_items = coach.load_precheck()
     except (OSError, KeyError, ValueError):
         precheck_items = []
-    report = coach.build_report(
-        profile, state.questions, ev, state.retries, state.messages,
-        state.last_suggest, state.last_question, state.previous, state.round,
-        precheck_items, current_precheck(precheck_items),
-    )
-    file_name = coach.report_file_name(profile["company"], profile["job"], state.round)
-    st.download_button(
+
+    today = user_now().date()  # 파일 이름 · 리포트 날짜 모두 사용자 시간대 기준
+
+    def build(updated_at: str | None = None) -> str:
+        return coach.build_report(
+            profile, state.questions, ev, state.retries, state.messages,
+            state.last_suggest, state.last_question, state.previous, state.round,
+            precheck_items, current_precheck(precheck_items), updated_at, today,
+        )
+
+    # 리포트 내용이 바뀐 때만 '마지막 업데이트' 시각을 새로 찍는다 (가장 최신 시각 하나만 남긴다).
+    content = build()
+    if state.get("report_content") != content:
+        state.report_content = content
+        state.report_updated = user_now().strftime("%Y-%m-%d %H:%M")
+    report = build(state.report_updated)
+
+    file_name = coach.report_file_name(profile["company"], profile["job"], state.round, today)
+    button_col, time_col = st.columns([3, 2], vertical_alignment="center")
+    button_col.download_button(
         f"{file_name} 다운로드",
         data=report,
         file_name=file_name,
         mime="text/markdown",
         type="primary",
     )
+    time_col.caption(f"🕒 마지막 업데이트: **{state.report_updated}**")
     st.caption(
         "오른쪽 위 복사 아이콘으로 내용을 복사할 수 있어요. 점수는 모두 앱이 계산한 값이고, "
         "'AI 의견' 표시가 붙은 글은 AI가 쓴 거예요. 마지막 질문을 만들어 두면 리포트에 같이 들어가요. "

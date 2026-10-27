@@ -363,13 +363,15 @@ def report_file_name(company: str, job: str, round_no: int, day: date | None = N
     return f"{day_text}-{_file_part(company)}-{job}-{round_no}회차-면접리포트.md"
 
 
-def report_data(profile: dict, questions: list[dict], evaluation: dict, round_no: int, precheck: dict) -> dict:
+def report_data(
+    profile: dict, questions: list[dict], evaluation: dict, round_no: int, precheck: dict, day: date
+) -> dict:
     """다음 면접에서 이어 하기 위해 리포트에 숨겨 둘 데이터. 이 회차 데이터만 넣는다 (지난 회차는 넣지 않음)."""
     return {
         "precheck": precheck,
         "version": REPORT_DATA_VERSION,
         "round": round_no,
-        "date": date.today().isoformat(),
+        "date": day.isoformat(),
         "profile": {k: profile[k] for k in ("name", "job", "company", "company_desc", "experience")},
         "questions": [{"type": q["type"], "question": q["question"]} for q in questions],
         "scores": [a["score"] for a in evaluation["answers"]],
@@ -503,10 +505,14 @@ def build_report(
     round_no: int = 1,
     precheck_items: list[dict] | None = None,
     precheck: dict | None = None,
+    updated_at: str | None = None,
+    day: date | None = None,
 ) -> str:
     """면접리포트.md.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
-    AI가 쓴 글은 'AI 의견' 으로 구분해 넣는다. 끝에는 이 회차의 이어 하기 데이터를 숨겨 둔다."""
+    AI가 쓴 글은 'AI 의견' 으로 구분해 넣는다. 끝에는 이 회차의 이어 하기 데이터를 숨겨 둔다.
+    day 는 사용자 시간대의 오늘 (배포 서버 날짜는 UTC 라서 하루 다를 수 있다)."""
+    day = day or date.today()
     criteria = list(CRITERIA.values())
     lines = [
         f"# 면접 리포트 · {round_no}회차",
@@ -515,7 +521,8 @@ def build_report(
         f"- 이름: {profile['name']}",
         f"- 직군: {profile['job']} 신입",
         f"- 회사: {profile['company']} ({profile['company_desc']})",
-        f"- 날짜: {date.today().isoformat()}",
+        f"- 날짜: {day.isoformat()}",
+        *([f"- 마지막 업데이트: {updated_at}"] if updated_at else []),
         "",
         "> 점수는 모두 앱이 계산한 값이에요. **AI 의견** 표시가 붙은 글은 AI가 쓴 것이라 사실인지 직접 확인해 주세요.",
         "",
@@ -618,7 +625,7 @@ def build_report(
     if precheck_items:
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
-    lines += ["", embed_report_data(report_data(profile, questions, evaluation, round_no, precheck))]
+    lines += ["", embed_report_data(report_data(profile, questions, evaluation, round_no, precheck, day))]
     return "\n".join(lines) + "\n"
 
 
