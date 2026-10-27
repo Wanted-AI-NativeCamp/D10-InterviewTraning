@@ -1,5 +1,7 @@
 # 질문 고르기 · 숫자 규칙 · 프롬프트 칸 채우기 · 리포트. AI 호출은 하지 않는다.
+import hashlib
 import json
+import math
 import re
 from datetime import date
 from pathlib import Path
@@ -29,6 +31,23 @@ CRITERION_MAX = 5
 ANSWER_MAX = CRITERION_MAX * len(CRITERIA)  # 20
 PANEL_MAX = 10
 REWRITE_BELOW = 14  # 답변 점수(0~20)가 이 점수 미만인 답만 고친 답을 보여 준다
+TOTAL_MAX = ANSWER_MAX * TOTAL_QUESTIONS  # 종합 점수 100
+
+# 최종 판결 (모의면접 학습 지표 — 실제 채용 결과와 무관)
+# 합격 = 종합 PASS_TOTAL 이상 + 위원 평균 PASS_PANEL 이상
+# 합격 후보 = 종합 PASS_TOTAL 이상 + 위원 평균 CANDIDATE_PANEL 이상 PASS_PANEL 미만
+PASS_TOTAL = 70        # 최신 종합 점수(0~100) 이상
+PASS_PANEL = 9.0       # 합격선: 위원 평균(0~10)
+CANDIDATE_PANEL = 7.0  # 합격 후보선: 위원 평균(0~10)
+VERDICT_LABELS = {"pass": "합격", "candidate": "합격 후보", "more": "추가 학습 필요"}
+MAX_CLUES = 2       # 역전의 실마리: 가장 낮은 답 몇 개
+
+# OpenAI 로 보내는 글의 길이 상한 · 재도전 횟수 상한 (사용량 줄이기)
+MAX_ANSWER_CHARS = 1500
+MAX_EXPERIENCE_CHARS = 1000  # 내 경험은 모든 호출에 들어간다
+MAX_LAST_QUESTION_CHARS = 300
+MAX_MEMO_CHARS = 200
+MAX_RETRIES = 3  # 질문당
 MAX_CHECKS = 2
 MAX_NEXT = 3
 LAST_ANGLES = ["회사", "직무", "성장"]  # 마지막 질문 3개의 관점 (이 순서)
@@ -124,6 +143,71 @@ def build_strategy(profile: dict, question: dict, answer: dict, evaluation: dict
         scores=scores,
         opinion=opinion,
     )
+
+
+def total_scores(evaluation: dict, retries: dict) -> dict:
+    """종합 점수(0~100). 최초 = 답변 점수 5개 합. 최신 = 재도전한 질문만 재도전 점수로 바꿔 넣은 합."""
+    first = sum(a["score"] for a in evaluation["answers"])
+    latest = sum(retries[a["no"]]["score"] if a["no"] in retries else a["score"] for a in evaluation["answers"])
+    return {"first": first, "latest": latest, "diff": latest - first, "max": TOTAL_MAX}
+
+
+def pick_clues(evaluation: dict, count: int = MAX_CLUES) -> list[dict]:
+    """역전의 실마리: 만점이 아닌 답 중 가장 낮은 답 count 개(같은 점수면 앞 번호)와
+    각 답의 가장 낮은 기준 1개(같으면 기준 순서). 모두 만점이면 빈 목록."""
+    order = list(CRITERIA)
+    candidates = sorted(
+        (a for a in evaluation["answers"] if a["score"] < ANSWER_MAX), key=lambda x: (x["score"], x["no"])
+    )
+    clues = []
+    for a in candidates[:count]:
+        key = min(order, key=lambda k: (a["scores"][k], order.index(k)))
+        clues.append({
+            "no": a["no"], "question": a["question"], "score": a["score"], "weak": a["weak"],
+            "criterion": key, "name": CRITERIA[key], "criterion_score": a["scores"][key],
+        })
+    return clues
+
+
+def verdict(totals: dict, panel_average: float) -> dict:
+    """최종 판결: pass(합격) · candidate(합격 후보) · more(추가 학습 필요).
+    short 는 '다음 단계' 까지 모자란 점수 (합격이면 빈 목록)."""
+    total_ok = totals["latest"] >= PASS_TOTAL
+    if total_ok and panel_average >= PASS_PANEL:
+        level = "pass"
+    elif total_ok and panel_average >= CANDIDATE_PANEL:
+        level = "candidate"
+    else:
+        level = "more"
+
+    target_panel = PASS_PANEL if level == "candidate" else CANDIDATE_PANEL
+    short = []
+    if level != "pass":
+        if not total_ok:
+            short.append(f"종합 점수 {PASS_TOTAL - totals['latest']}점")
+        if panel_average < target_panel:
+            # 0.1 단위로 올림 (8.99 처럼 바로 아래일 때 '0.0점 부족' 으로 보이지 않게)
+            gap = math.ceil(round((target_panel - panel_average) * 10, 6)) / 10
+            short.append(f"위원 평균 {gap:.1f}점")
+    return {
+        "level": level, "label": VERDICT_LABELS[level], "passed": level == "pass",
+        "total": totals["latest"], "panel": panel_average, "short": short,
+    }
+
+
+def criteria_version() -> str:
+    """평가 기준의 짧은 지문. 기준 문장 · 점수 범위가 바뀌면 값이 바뀐다 (이어 하기 때 비교)."""
+    payload = json.dumps(
+        {"panel": PANEL_CRITERIA, "criteria": CRITERIA, "criterion_max": CRITERION_MAX, "panel_max": PANEL_MAX},
+        ensure_ascii=False, sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def persona_summary(job: str) -> str:
+    """브리핑용 면접관 한 줄 (페르소나의 첫 문장)."""
+    persona = PERSONAS.get(job, "").strip()
+    return persona.split(". ")[0].rstrip(".") if persona else "(페르소나 없음)"
 
 
 def strategy_gap(scores: dict) -> dict:
@@ -364,10 +448,17 @@ def report_file_name(company: str, job: str, round_no: int, day: date | None = N
 
 
 def report_data(
-    profile: dict, questions: list[dict], evaluation: dict, round_no: int, precheck: dict, day: date
+    profile: dict, questions: list[dict], evaluation: dict, retries: dict, round_no: int, precheck: dict, day: date
 ) -> dict:
-    """다음 면접에서 이어 하기 위해 리포트에 숨겨 둘 데이터. 이 회차 데이터만 넣는다 (지난 회차는 넣지 않음)."""
+    """다음 면접에서 이어 하기 위해 리포트에 숨겨 둘 데이터. 이 회차 데이터만 넣는다 (지난 회차는 넣지 않음).
+    total_* · criteria_version · passed 는 나중에 더한 칸이라, 없는 옛 리포트도 그대로 읽힌다."""
+    totals = total_scores(evaluation, retries)
     return {
+        "total_first": totals["first"],
+        "total_latest": totals["latest"],
+        "passed": verdict(totals, evaluation["panel_average"])["passed"],
+        "verdict": verdict(totals, evaluation["panel_average"])["level"],
+        "criteria_version": criteria_version(),
         "precheck": precheck,
         "version": REPORT_DATA_VERSION,
         "round": round_no,
@@ -425,7 +516,11 @@ def parse_report(text: str) -> dict:
                     "missing": value.get("missing") is True,
                     "memo": value["memo"].strip()[:MAX_FIELD_CHARS] if isinstance(value.get("memo"), str) else "",
                 }
+    total_latest = raw.get("total_latest")  # 종합 점수 기능 전 리포트에는 없다
+    version = raw.get("criteria_version")
     return {
+        "total_latest": clamp(total_latest, 0, TOTAL_MAX) if isinstance(total_latest, int) else None,
+        "criteria_version": version.strip()[:16] if isinstance(version, str) else "",
         "precheck": precheck,
         "round": clamp(raw.get("round", 1), 1, MAX_ROUND),
         "date": _text(raw.get("date", ""), "date"),
@@ -450,8 +545,14 @@ def match_questions(df: pd.DataFrame, job: str, texts: list[str]) -> list[dict] 
     return picked if len(picked) == TOTAL_QUESTIONS else None
 
 
-def compare_previous(previous: dict, evaluation: dict, questions: list[dict]) -> dict:
-    """지난 면접 → 이번 면접. 같은 질문 글이면 질문별 점수도 비교한다."""
+def criteria_changed(previous: dict) -> bool:
+    """지난 회차와 평가 기준이 다른가. 기준 버전이 없는 옛 리포트는 알 수 없으니 False."""
+    return bool(previous.get("criteria_version")) and previous["criteria_version"] != criteria_version()
+
+
+def compare_previous(previous: dict, evaluation: dict, questions: list[dict], retries: dict | None = None) -> dict:
+    """지난 면접 → 이번 면접. 같은 질문 글이면 질문별 점수도 비교한다.
+    종합 점수는 지난 리포트에 있을 때만 비교한다 (옛 리포트는 None)."""
     before_by_text = dict(zip(previous["questions"], previous["scores"]))
     rows = []
     for a in evaluation["answers"]:
@@ -465,6 +566,9 @@ def compare_previous(previous: dict, evaluation: dict, questions: list[dict]) ->
         "panel_before": previous["panel_average"],
         "panel_after": evaluation["panel_average"],
         "panel_diff": evaluation["panel_average"] - previous["panel_average"],
+        "total_before": previous.get("total_latest"),
+        "total_after": total_scores(evaluation, retries or {})["latest"],
+        "criteria_changed": criteria_changed(previous),
         "rows": rows,
     }
 
@@ -559,14 +663,34 @@ def build_report(
                 f"| {no}. {_cell(questions[no - 1]['question'])} | {diff['before']} | {diff['after']} | {diff['diff']:+d} |"
             )
 
+    totals = total_scores(evaluation, retries)
+    result = verdict(totals, evaluation["panel_average"])
+    lines += [
+        "",
+        f"### 종합 점수 (0~{TOTAL_MAX})",
+        "",
+        f"- 최초 종합: {totals['first']}",
+        f"- 최신 종합 (재도전 반영): {totals['latest']} ({totals['diff']:+d})",
+        f"- 모의면접 판정: **{result['label']}** "
+        f"(합격: 최신 종합 {PASS_TOTAL} 이상 · 위원 평균 {PASS_PANEL:.1f} 이상 / "
+        f"합격 후보: 최신 종합 {PASS_TOTAL} 이상 · 위원 평균 {CANDIDATE_PANEL:.1f} 이상)",
+        "- 이 판정은 AI 모의면접 학습 지표이며 실제 채용 결과와 무관해요.",
+    ]
+
     if previous:
-        prev = compare_previous(previous, evaluation, questions)
+        prev = compare_previous(previous, evaluation, questions, retries)
         lines += [
             "",
             f"### 지난 면접({prev['round']}회차 · {prev['date']})과 비교",
             "",
             f"- 위원 평균: {prev['panel_before']:.1f} → {prev['panel_after']:.1f} ({prev['panel_diff']:+.1f})",
         ]
+        if prev["total_before"] is not None:
+            lines.append(
+                f"- 최신 종합: {prev['total_before']} → {prev['total_after']} ({prev['total_after'] - prev['total_before']:+d})"
+            )
+        if prev["criteria_changed"]:
+            lines.append("- ⚠️ 지난 회차와 평가 기준이 달라서 점수 비교가 정확하지 않을 수 있어요.")
         if prev["rows"]:
             lines += ["", "| 질문 | 지난 | 이번 | 차이 |", "| --- | --- | --- | --- |"]
             lines += [f"| {_cell(r['질문'])} | {r['지난']} | {r['이번']} | {r['차이']:+d} |" for r in prev["rows"]]
@@ -625,7 +749,7 @@ def build_report(
     if precheck_items:
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
-    lines += ["", embed_report_data(report_data(profile, questions, evaluation, round_no, precheck, day))]
+    lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day))]
     return "\n".join(lines) + "\n"
 
 
