@@ -3,13 +3,14 @@ import hashlib
 import json
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from prompts import (
     CONTEXT,
+    FIELDS,
     EVALUATOR,
     HIGHLIGHT,
     INTERVIEWER,
@@ -62,6 +63,7 @@ MAX_ROUND = 999
 
 QUESTIONS_PATH = Path(__file__).parent / "data" / "questions.csv"
 PANEL_RATIONALE_PATH = Path(__file__).parent / "data" / "평가기준_근거.md"
+MEMO_STRATEGY_PATH = Path(__file__).parent / "data" / "암기전략.md"
 PRECHECK_PATH = Path(__file__).parent / "data" / "사전탐색_체크리스트.csv"
 
 # 사전 탐색에서 '찾아봐도 없어요' 일 때 언제 확인하면 되는지
@@ -73,14 +75,20 @@ PRECHECK_TIMING = {
 PRECHECK_LATER_LABEL = {"마지막": "핵심 질문을 끝낸 뒤 확인", "합격 후": "합격(취직 확정) 후 확인"}
 MAX_PRECHECK_ITEMS = 100
 JOBS = list(PERSONAS)
+DEFAULT_FIELD = "공통"
 
 
 def load_questions(path: Path = QUESTIONS_PATH) -> pd.DataFrame:
-    return pd.read_csv(path, encoding="utf-8-sig")
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    if "분야" not in df.columns:  # 분야 칸이 생기기 전 질문 은행은 모두 공통
+        df["분야"] = DEFAULT_FIELD
+    df["분야"] = df["분야"].fillna(DEFAULT_FIELD)
+    return df
 
 
-def pick_questions(df: pd.DataFrame, job: str) -> list[dict]:
-    """자기소개 1 + 공통 1 + 직무 1 + 경험 1 + 상황 1 = 5개를 이 순서로 고른다."""
+def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD) -> list[dict]:
+    """자기소개 1 + 공통 1 + 직무 1 + 경험 1 + 상황 1 = 5개를 이 순서로 무작위로 고른다.
+    자리마다 고른 분야의 질문이 있으면 그중에서, 없으면 분야 공통 질문에서 고른다."""
     common = df[df["직군"] == "공통"]
     is_intro = common["질문"].str.contains("자기소개")
     mine = df[df["직군"] == job]
@@ -94,18 +102,28 @@ def pick_questions(df: pd.DataFrame, job: str) -> list[dict]:
     ]
     picked = []
     for pool in pools:
+        in_field = pool[pool["분야"] == field] if field != DEFAULT_FIELD else pool.iloc[0:0]
+        pool = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
         if pool.empty:
             raise ValueError(f"'{job}' 직군 질문이 질문 은행에 부족해요.")
         row = pool.sample(1).iloc[0]
-        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"]})
+        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"]})
     assert len(picked) == TOTAL_QUESTIONS
     return picked
 
 
+def field_of(profile: dict) -> str:
+    """분야 (분야 기능 전 면접 · 리포트는 '공통')."""
+    return profile.get("field") if profile.get("field") in FIELDS else DEFAULT_FIELD
+
+
 def build_context(profile: dict) -> str:
+    field = field_of(profile)
     return CONTEXT.format(
         company=profile["company"],
         company_desc=profile["company_desc"],
+        field=field,
+        field_desc=FIELDS[field],
         job=profile["job"],
         experience=profile["experience"],
     )
@@ -210,6 +228,215 @@ def persona_summary(job: str) -> str:
     return persona.split(". ")[0].rstrip(".") if persona else "(페르소나 없음)"
 
 
+# ── 암기 시뮬레이션 (AI 없이 코드로) ──
+MEMO_LEVELS = {1: 4, 2: 2, 3: 1}  # 빈칸 단계 → 핵심어 n개마다 1개를 가린다
+MEMO_PASS = 80  # 실전 시뮬레이션: 핵심어를 이 % 이상 기억하면 다음 질문으로
+MEMO_MODES = ["① 뼈대 보기", "② 빈칸 채우기", "③ 실전 시뮬레이션"]
+# 단계별 연습 순서: (모드, 빈칸 단계). 낮은 단계부터 올라간다.
+MEMO_STEPS = [(0, None), (1, 1), (1, 2), (1, 3), (2, None)]
+# 실전 시뮬레이션 점수가 낮을 때 돌아갈 단계: 이 % 미만이면 그 단계부터 (MEMO_STEPS 번호)
+MEMO_FALLBACK = [(40, 0), (60, 1), (MEMO_PASS, 2)]
+SPEAK_LOG_KEEP = 5            # 말하기 타이머 기록은 답마다 최근 몇 번
+INTRO_TARGET = (50, 60)       # 1분 자기소개 목표 초
+SPEAK_SMOOTH = 0.2            # 대본 없이 말하기가 대본 읽기보다 20% 이내로 더 걸리면 '거의 안 막힘'
+SPEAK_STUCK = 0.5             # 50% 넘게 더 걸리면 '많이 막힘'
+SENTENCE_RECALL = 0.5         # 문장의 핵심어를 이 비율 이상 쓰면 그 문장을 기억한 것으로 본다
+REVIEW_DAYS = [(0, "오늘"), (1, "내일"), (3, "3일 뒤"), (7, "1주 뒤")]  # 간격 반복 복습
+SPEAK_CHARS_PER_SEC = 4.5  # 소리 내어 말할 때 1초에 읽는 글자 수 (대략)
+STOPWORDS = {
+    "그리고", "그래서", "하지만", "그런데", "그러나", "또한", "저는", "제가", "저희", "있습니다", "했습니다",
+    "합니다", "입니다", "됩니다", "있었습니다", "것을", "것이", "것은", "통해", "위해", "대한", "때문에", "생각합니다",
+}
+PARTICLES = sorted(["을", "를", "이", "가", "은", "는", "에", "에서", "으로", "로", "와", "과", "도", "의",
+                    "에게", "께서", "까지", "부터", "보다", "처럼", "이라", "라고", "이고", "하고"], key=len, reverse=True)
+
+
+def _core(word: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", word)
+
+
+def stem(word: str) -> str:
+    """끝에 붙은 조사 하나를 뗀다 (남는 글자가 2자 이상일 때만). '테스트를' → '테스트'."""
+    core = _core(word)
+    for p in PARTICLES:
+        if core.endswith(p) and len(core) - len(p) >= 2:
+            return core[: -len(p)]
+    return core
+
+
+PREDICATE_ENDINGS = ("니다", "어요", "아요", "해요", "에요", "예요", "어서", "아서", "해서", "었고", "았고", "했고", "다")
+
+
+def is_keyword(word: str) -> bool:
+    """핵심어: 숫자가 들어 있거나, 조사를 떼고도 3자 이상이고, 흔한 말(STOPWORDS)이 아닌 단어.
+    '진행했습니다' 같은 서술어는 말투만 달라도 틀린 것으로 잡히니 뺀다 (외울 건 내용)."""
+    core = _core(word)
+    if not core or core in STOPWORDS:
+        return False
+    if any(ch.isdigit() for ch in core):
+        return True
+    return len(stem(word)) >= 3 and not core.endswith(PREDICATE_ENDINGS)
+
+
+def key_words(text: str) -> list[str]:
+    """답에서 핵심어(조사 뗀 형태)를 나온 순서대로, 중복 없이."""
+    return list(dict.fromkeys(stem(w) for w in text.split() if is_keyword(w)))
+
+
+def skeleton(text: str) -> list[dict]:
+    """뼈대 보기: 문장마다 그 문장의 핵심어."""
+    return [{"sentence": s, "keys": key_words(s)} for s in split_sentences(text)]
+
+
+def speak_seconds(text: str) -> int:
+    return round(len(re.sub(r"\s", "", text)) / SPEAK_CHARS_PER_SEC)
+
+
+def cloze(text: str, level: int) -> list[tuple[str, bool]]:
+    """빈칸 채우기: (단어, 가림 여부) 목록. 핵심어 중 MEMO_LEVELS[level] 개마다 1개를 가린다."""
+    step = MEMO_LEVELS.get(level, 1)
+    out, nth = [], 0
+    for word in text.split():
+        hide = False
+        if is_keyword(word):
+            hide = nth % step == 0
+            nth += 1
+        out.append((word, hide))
+    return out
+
+
+def recall_check(original: str, attempt: str) -> dict:
+    """실전 시뮬레이션 채점: 원래 답의 핵심어 중 몇 개를 기억해 썼는지 (조사 뗀 형태로 비교)."""
+    keys = key_words(original)
+    written = re.sub(r"\s", "", attempt)
+    found = [k for k in keys if k in written]
+    missing = [k for k in keys if k not in written]
+    ratio = round(100 * len(found) / len(keys)) if keys else 0
+    return {"total": len(keys), "found": found, "missing": missing, "recall": ratio}
+
+
+def mark_words(text: str) -> list[tuple[str, str]]:
+    """뼈대 보기 '전체 문장' 용: 단어마다 'key'(핵심어) 또는 'rest'(나머지 내용)."""
+    return [(word, "key" if is_keyword(word) else "rest") for word in text.split()]
+
+
+MEMO_TAGS = {1: "🟢 가볍게", 2: "🟡 절반", 3: "🔴 전부"}  # 빈칸 채우기 태그 (가리는 양)
+
+
+def step_label(index: int) -> str:
+    mode, level = MEMO_STEPS[index]
+    return MEMO_MODES[mode] + (f" {MEMO_TAGS[level]}" if level else "")
+
+
+def fallback_step(recall: int) -> int | None:
+    """실전 시뮬레이션이 덜 외워졌으면 돌아갈 단계 번호 (MEMO_STEPS). 통과면 None."""
+    for limit, index in MEMO_FALLBACK:
+        if recall < limit:
+            return index
+    return None
+
+
+def next_step(mode: int, level: int | None) -> int | None:
+    """지금 단계의 다음 단계 번호. 마지막(③)이면 None."""
+    here = MEMO_STEPS.index((mode, level if mode == 1 else None))
+    return here + 1 if here + 1 < len(MEMO_STEPS) else None
+
+
+def sentence_recall(original: str, attempt: str) -> list[dict]:
+    """문장 단위로 기억했는지: 원래 답의 문장마다 그 문장 핵심어를 SENTENCE_RECALL 이상 썼으면 기억한 것.
+    핵심어가 없는 문장(짧은 맺음말 등)은 판단하지 않는다 (remembered=None)."""
+    written = re.sub(r"\s", "", attempt)
+    rows = []
+    for sentence in split_sentences(original):
+        keys = key_words(sentence)
+        if not keys:
+            rows.append({"sentence": sentence, "remembered": None})
+            continue
+        hit = sum(1 for k in keys if k in written)
+        rows.append({"sentence": sentence, "remembered": hit / len(keys) >= SENTENCE_RECALL})
+    return rows
+
+
+def reading_speed(seconds: int, text: str) -> float:
+    """대본을 보고 읽은 속도 (1초에 몇 자, 띄어쓰기 빼고)."""
+    return len(re.sub(r"\s", "", text)) / max(seconds, 1)
+
+
+def intro_feedback(seconds: int) -> tuple[str, str]:
+    low, high = INTRO_TARGET
+    if seconds < low:
+        return "info", f"자기소개 목표({low}~{high}초)보다 {low - seconds}초 짧아요. 경험 하나를 조금 더 구체적으로 말해 보세요."
+    if seconds > high:
+        return "warning", f"자기소개 목표({low}~{high}초)보다 {seconds - high}초 길어요. 핵심어만 남기고 줄여 보세요."
+    return "success", f"자기소개 목표({low}~{high}초) 안이에요."
+
+
+# ── 말하기 모드: 1단계 대본 읽기 → 2단계 힌트(뼈대 → 빈칸 가볍게 · 절반 · 전부) → 3단계 대본 없이 ──
+SPEAK_STEP_NAMES = {1: "📖 1단계 · 대본 보고 읽기", 2: "👀 2단계 · 힌트 보고 말하기", 3: "🙈 3단계 · 대본 없이 말하기"}
+SPEAK_HINTS = {"skeleton": "뼈대", 1: MEMO_TAGS[1], 2: MEMO_TAGS[2], 3: MEMO_TAGS[3]}  # 2단계 힌트: 점점 적게
+SPEAK_PHASES = ["read", "hint:skeleton", "hint:1", "hint:2", "hint:3", "speak"]  # 점진적으로 연습하는 순서
+
+
+def speak_phase(step: int, hint=None) -> str:
+    return {1: "read", 3: "speak"}.get(step) or f"hint:{hint}"
+
+
+def phase_step(phase: str) -> tuple[int, object]:
+    """'hint:2' → (2, 2), 'hint:skeleton' → (2, 'skeleton'), 'read' → (1, None)."""
+    if phase.startswith("hint:"):
+        value = phase.split(":", 1)[1]
+        return 2, int(value) if value.isdigit() else value
+    return (1 if phase == "read" else 3), None
+
+
+def phase_label(phase: str) -> str:
+    step, hint = phase_step(phase)
+    name = SPEAK_STEP_NAMES[step]
+    return f"{name} ({SPEAK_HINTS[hint]})" if step == 2 else name
+
+
+def next_phase(phase: str) -> str | None:
+    i = SPEAK_PHASES.index(phase)
+    return SPEAK_PHASES[i + 1] if i + 1 < len(SPEAK_PHASES) else None
+
+
+def easier_phase(phase: str) -> str | None:
+    """한 단계 쉬운 연습 (대본에 더 가까운 쪽). 1단계면 None."""
+    i = SPEAK_PHASES.index(phase)
+    return SPEAK_PHASES[i - 1] if i > 0 else None
+
+
+def phase_feedback(read_s: int | None, seconds: int, phase: str, text: str, question: str) -> list[tuple[str, str]]:
+    """말하기 단계 결과 안내 [(종류, 문장)]. 2 · 3단계는 1단계(대본 읽기) 시간과 비교한다."""
+    label = phase_label(phase)
+    if phase == "read":
+        return [("info", f"{label} {seconds}초 · 내 읽기 속도는 1초에 {reading_speed(seconds, text):.1f}자예요. "
+                         "이제 2단계로 힌트를 보며 말해 보세요.")]
+    if not read_s:
+        return [("info", f"{label} {seconds}초. 먼저 📖 1단계 대본 보고 읽기를 재면 얼마나 막혔는지 비교할 수 있어요.")]
+    gap = seconds - read_s
+    ratio = gap / read_s
+    following, easier = next_phase(phase), easier_phase(phase)
+    if ratio < -SPEAK_SMOOTH:
+        messages = [("info", f"{label} {seconds}초 · 읽기보다 {-gap}초 빨라요. 빠뜨린 내용이 없는지 확인해 보세요.")]
+    elif ratio <= SPEAK_SMOOTH:
+        tail = f" {phase_label(following)} 로 넘어가 보세요." if following else " 대본 없이도 자연스럽게 말할 수 있어요."
+        messages = [("success", f"{label} {seconds}초 · 읽기와 {abs(gap)}초 차이로 거의 막히지 않았어요.{tail}")]
+    elif ratio <= SPEAK_STUCK:
+        messages = [("warning", f"{label} {seconds}초 · 읽기보다 {gap}초(+{round(ratio * 100)}%) 더 걸렸어요. "
+                                "막힌 곳을 떠올리며 같은 단계를 한 번 더 해 보세요.")]
+    else:
+        back = f" {phase_label(easier)} 로 돌아가 연습해 보세요." if easier else ""
+        messages = [("warning", f"{label} {seconds}초 · 읽기보다 {gap}초(+{round(ratio * 100)}%) 더 걸려서 많이 막혔어요.{back}")]
+    if phase == "speak" and "자기소개" in question:
+        messages.append(intro_feedback(seconds))
+    return messages
+
+
+def review_schedule(today: date) -> list[tuple[str, date]]:
+    return [(label, today + timedelta(days=d)) for d, label in REVIEW_DAYS]
+
+
 def strategy_gap(scores: dict) -> dict:
     """기준별로 더 받을 수 있는 점수 (5점 만점 - 지금 점수). 0점 차이는 뺀다."""
     return {key: CRITERION_MAX - scores[key] for key in CRITERIA if scores[key] < CRITERION_MAX}
@@ -264,6 +491,10 @@ def precheck_state(items: list[dict], found: list[bool], missing: list[bool], me
         for item, f, m, memo in zip(items, found, missing, memos)
         if f or m or memo.strip()
     }
+
+
+def load_memo_strategy(path: Path = MEMO_STRATEGY_PATH) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def load_panel_rationale(path: Path = PANEL_RATIONALE_PATH) -> str:
@@ -463,7 +694,10 @@ def report_data(
         "version": REPORT_DATA_VERSION,
         "round": round_no,
         "date": day.isoformat(),
-        "profile": {k: profile[k] for k in ("name", "job", "company", "company_desc", "experience")},
+        "profile": {
+            **{k: profile[k] for k in ("name", "job", "company", "company_desc", "experience")},
+            "field": field_of(profile),
+        },
         "questions": [{"type": q["type"], "question": q["question"]} for q in questions],
         "scores": [a["score"] for a in evaluation["answers"]],
         "panel_average": round(evaluation["panel_average"], 2),
@@ -497,6 +731,7 @@ def parse_report(text: str) -> dict:
 
     p = raw.get("profile") or {}
     profile = {k: _text(p.get(k), k) for k in ("name", "job", "company", "company_desc", "experience")}
+    profile["field"] = field_of(p)  # 분야가 없거나 모르는 값이면 '공통'
     if profile["job"] not in JOBS:
         raise ValueError("리포트의 직군을 알 수 없어요.")
 
@@ -541,7 +776,7 @@ def match_questions(df: pd.DataFrame, job: str, texts: list[str]) -> list[dict] 
         if rows.empty:
             return None
         row = rows.iloc[0]
-        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"]})
+        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"]})
     return picked if len(picked) == TOTAL_QUESTIONS else None
 
 
@@ -623,6 +858,7 @@ def build_report(
         "",
         f"- 회차: {round_no}회차",
         f"- 이름: {profile['name']}",
+        f"- 분야: {field_of(profile)}",
         f"- 직군: {profile['job']} 신입",
         f"- 회사: {profile['company']} ({profile['company_desc']})",
         f"- 날짜: {day.isoformat()}",

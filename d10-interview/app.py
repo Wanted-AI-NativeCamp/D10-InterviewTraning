@@ -1,5 +1,6 @@
 # Streamlit 화면만. 프롬프트는 prompts.py, AI 호출은 llm.py, 계산은 coach.py.
 import html
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,6 +11,7 @@ import coach
 from llm import LLMError, ask_json
 from prompts import (
     EVAL_SCHEMA,
+    FIELDS,
     HIGHLIGHT_SCHEMA,
     INTERVIEWER_SCHEMA,
     LAST_QUESTION_SCHEMA,
@@ -27,12 +29,16 @@ DEFAULT_TIMEZONE = "Asia/Seoul"  # 브라우저 시간대를 모를 때
 st.caption("🌓 다크 · 라이트 모드는 오른쪽 위 ⋮ 메뉴 → Settings 에서 바꿀 수 있어요.")
 
 
-def reset(job: str | None = None):
-    """job 을 주면 그 직군 모드의 시작 화면으로, 없으면 직군 고르기 화면으로."""
+def reset(job: str | None = None, field: str | None = None):
+    """job 을 주면 그 분야 · 직군 모드의 시작 화면으로, 없으면 분야 · 직군 고르기 화면으로.
+    불러온 리포트 목록(reports)은 지우지 않는다 (상태창에서 회사를 바꿔 가며 쓰도록)."""
+    reports = st.session_state.get("reports", {})
     st.session_state.clear()
+    st.session_state.reports = reports
     st.session_state.stage = "start" if job else "pick"
     if job:
         st.session_state.job = job
+        st.session_state.field = field if field in FIELDS else coach.DEFAULT_FIELD
 
 
 if "stage" not in st.session_state:
@@ -59,8 +65,50 @@ def call_ai(spinner_text: str, instructions: str, user_input: str, schema: dict,
 
 
 def question_message(index: int) -> dict:
-    text = f"**질문 {index + 1}/{coach.TOTAL_QUESTIONS}.** {state.questions[index]['question']}"
+    question = state.questions[index]
+    field = question.get("field", coach.DEFAULT_FIELD)
+    tag = f" `🧭 {field} 질문`" if field != coach.DEFAULT_FIELD else ""
+    text = f"**질문 {index + 1}/{coach.TOTAL_QUESTIONS}.**{tag} {question['question']}"
     return {"role": "assistant", "content": text, "q": index, "kind": "question"}
+
+
+NAV_BUTTONS = [
+    ("🏠 홈으로 돌아가기", "home", "분야 · 직군 고르기 첫 화면으로 가요."),
+    ("처음부터 다시", "restart", "같은 분야 · 직군 모드로 새 면접을 시작해요."),
+    ("분야 다시 고르기", "field", "직군은 그대로 두고 분야를 다시 골라요."),
+    ("직군 다시 고르기", "job", "분야는 그대로 두고 직군을 다시 골라요."),
+]
+
+
+def leave(target: str):
+    """상태창 이동. home: 처음 화면 · restart: 같은 모드로 새 면접 · field / job: 하나만 다시 고르기."""
+    job, field = state.get("job"), state.get("field")
+    if target == "restart":
+        reset(job, field)
+        return
+    reset()
+    if target == "field" and job:
+        state.pick_job_hint = job  # 고르던 직군에 ✔ 표시
+    if target == "job" and field:
+        state.pick_field = field   # 고르던 분야를 그대로 골라 둔다
+
+
+def job_reports() -> dict:
+    """불러온 리포트 중 지금 직군 것만 (올린 순서대로)."""
+    return {fid: r for fid, r in state.get("reports", {}).items() if r["profile"]["job"] == state.get("job")}
+
+
+def activate_report(fid: str):
+    """불러온 리포트 하나를 '이어 할 회차' 로 정하고 시작 화면 칸을 채운다."""
+    report = state.reports[fid]
+    state.active_report = fid
+    state.previous = report
+    state.start_mode = "resume"
+    state.field = report["profile"]["field"]  # 이어 하는 리포트의 분야로 맞춘다
+    for field in ("name", "company", "company_desc", "experience"):
+        state[f"f_{field}"] = report["profile"][field]
+    # 경험 칸 글자 수 상한에 맞춘다 (상한보다 긴 값을 넣으면 칸이 에러를 낸다)
+    state.f_experience = state.f_experience[: coach.MAX_EXPERIENCE_CHARS]
 
 
 def restore_precheck(saved: dict):
@@ -82,9 +130,12 @@ def restore_precheck(saved: dict):
 with st.sidebar:
     st.header("상태창")
     if state.get("job"):
-        st.markdown(f"**{state.job} 직군 모드**" + (f" · {state.round}회차" if state.get("round") else ""))
+        st.markdown(
+            f"**{state.get('field', coach.DEFAULT_FIELD)} · {state.job} 직군 모드**"
+            + (f" · {state.round}회차" if state.get("round") else "")
+        )
     if state.stage == "pick":
-        st.caption("직군을 고르면 그 직군 모드로 시작해요.")
+        st.caption("분야와 직군을 고르면 그 모드로 시작해요.")
     elif state.stage == "start":
         st.caption("면접을 시작하면 진행 상황이 보여요.")
     elif state.stage == "briefing":
@@ -102,23 +153,72 @@ with st.sidebar:
                 delta=totals["diff"] or None, help="재도전한 질문은 재도전 점수로 바꿔 넣은 합이에요.",
             )
             st.metric("위원 평균", f"{ev['panel_average']:.1f}/{coach.PANEL_MAX}")
+    # 불러온 리포트: 누르면 그 회사로 바꾼다. 면접 중이면 기록이 사라지니 한 번 더 확인한다.
+    loaded = job_reports() if state.stage != "pick" else {}
+    if loaded:
+        st.divider()
+        st.markdown("**📂 불러온 리포트**")
+        for fid, report in loaded.items():
+            active = state.get("active_report") == fid
+            label = f"{'✔ ' if active else ''}{report['profile']['company']} · {report['round']}회차 ({report['date'][5:]})"
+            if st.button(label, key=f"report_{fid}", width="stretch", type="primary" if active else "secondary"):
+                if state.stage in ("start", "briefing"):
+                    activate_report(fid)
+                    state.stage = "start"
+                    st.rerun()
+                elif not active:
+                    state.switch_pending = fid
+                    st.rerun()
+        pending = state.get("switch_pending")
+        if pending in loaded:
+            company = loaded[pending]["profile"]["company"]
+            st.warning(f"'{company}' 로 바꾸면 지금 면접 기록이 사라져요. 📄 리포트를 받아 두었나요?")
+            yes_col, no_col = st.columns(2)
+            if yes_col.button("바꾸기", type="primary", width="stretch"):
+                reset(state.job, state.get("field"))
+                activate_report(pending)
+                st.rerun()
+            if no_col.button("취소", width="stretch"):
+                state.switch_pending = None
+                st.rerun()
+        st.divider()
+
+    # 이동 버튼. 면접 중 · 끝난 뒤에는 기록이 사라지니 한 번 더 확인한다.
     if state.stage != "pick":
-        if st.button("처음부터 다시", width="stretch", help="같은 직군 모드로 새 면접을 시작해요."):
-            reset(state.job)
-            st.rerun()
-        if st.button("직군 다시 고르기", width="stretch"):
-            reset()
-            st.rerun()
+        for label, target, tip in NAV_BUTTONS:
+            if st.button(label, key=f"nav_{target}", width="stretch", help=tip):
+                if state.stage in ("interview", "done"):
+                    state.leave_pending = target
+                else:
+                    leave(target)
+                st.rerun()
+        target = state.get("leave_pending")
+        if target:
+            st.warning("지금 면접 기록이 사라져요. 📄 리포트를 받아 두었나요?")
+            go_col, stay_col = st.columns(2)
+            if go_col.button("이동하기", type="primary", width="stretch"):
+                leave(target)
+                st.rerun()
+            if stay_col.button("머무르기", width="stretch"):
+                state.leave_pending = None
+                st.rerun()
 
 
-# ── 직군 고르기 ─────────────────────────────────────────────
+# ── 분야 · 직군 고르기 ──────────────────────────────────────
 if state.stage == "pick":
     st.title("AI 면접 코치")
-    st.write("신입 모의면접이에요. 먼저 지원할 직군을 골라 주세요.")
+    st.write("신입 모의면접이에요. 먼저 지원할 **분야**와 **직군**을 골라 주세요.")
+    if state.get("pick_field") not in FIELDS:
+        state.pick_field = coach.DEFAULT_FIELD
+    field = st.pills("① 분야", list(FIELDS), key="pick_field", required=True)
+    st.caption(f"{field} · {FIELDS[field]}. 면접관과 평가 위원회가 이 분야를 고려해요.")
+    st.markdown("**② 직군**")
+    hint = state.get("pick_job_hint")
     for column, job in zip(st.columns(len(coach.JOBS)), coach.JOBS):
-        if column.button(job, width="stretch", type="primary" if PERSONAS[job] else "secondary"):
+        if column.button(("✔ " if job == hint else "") + job, key=f"pick_job_{job}", width="stretch",
+                         type="primary" if PERSONAS[job] else "secondary"):
             if PERSONAS[job]:
-                reset(job)
+                reset(job, field)
                 st.rerun()
             else:
                 st.info(f"'{job}' 직군 모드는 준비 중이에요. 면접관 페르소나가 아직 없어요.")
@@ -128,7 +228,8 @@ if state.stage == "pick":
 # ── 시작 화면 ───────────────────────────────────────────────
 if state.stage == "start":
     job = state.job
-    st.title(f"{job} 직군 모드")
+    field = state.get("field", coach.DEFAULT_FIELD)
+    st.title(f"{field} · {job} 직군 모드")
     st.write("신입 모의면접이에요. 질문 5개와 꼬리 질문으로 진행해요.")
 
     # 두 갈래 시작: 새 면접 / 이전 면접 이어하기
@@ -136,12 +237,14 @@ if state.stage == "start":
     new_col, resume_col = st.columns(2)
     if new_col.button("🆕 새 면접 시작하기", width="stretch", type="primary" if mode == "new" else "secondary"):
         if mode != "new":
-            for key in ("previous", "previous_file", "f_name", "f_company", "f_company_desc", "f_experience"):
-                state.pop(key, None)  # 이어하기에서 채운 값을 비우고 새로 시작
+            for key in ("previous", "active_report", "f_name", "f_company", "f_company_desc", "f_experience"):
+                state.pop(key, None)  # 이어하기에서 채운 값을 비우고 새로 시작 (불러온 목록은 남긴다)
         state.start_mode = "new"
         st.rerun()
     if resume_col.button("📂 이전 면접 이어하기", width="stretch", type="primary" if mode == "resume" else "secondary"):
         state.start_mode = "resume"
+        if not state.get("previous") and job_reports():
+            activate_report(list(job_reports())[-1])  # 이미 불러온 리포트가 있으면 마지막 것으로
         st.rerun()
     if not mode:
         st.caption("처음이면 '새 면접 시작하기', 지난 회차 면접리포트.md 가 있으면 '이전 면접 이어하기' 를 눌러 주세요.")
@@ -150,42 +253,43 @@ if state.stage == "start":
     st.caption(f"이번 면접: **{coach.next_round(state.get('previous'))}회차**")
 
     if mode == "resume":
-        uploaded = st.file_uploader(
-            "이어서 할 회차의 면접리포트.md 를 하나만 올려 주세요.",
+        files = st.file_uploader(
+            "이어서 할 면접리포트.md 를 올려 주세요. 회사마다 하나씩, 여러 개 올릴 수 있어요.",
             type=["md"],
-            accept_multiple_files=False,
-            help="파일 하나에는 그 회차 데이터만 들어 있어요. 이어 하면 다음 회차로 기록돼요.",
+            accept_multiple_files=True,
+            help="파일 하나에는 그 회차 데이터만 들어 있어요. 올린 리포트는 왼쪽 상태창에서 바꿔 가며 쓸 수 있어요.",
         )
-        if uploaded is None:
-            state.previous = None
-            state.previous_file = None
-        elif uploaded.file_id != state.get("previous_file"):
-            # 새 파일을 올렸을 때 한 번만 읽고, 아래 칸을 채운 뒤 다시 그린다.
-            state.previous_file = uploaded.file_id
+        errors = state.setdefault("report_errors", {})
+        newest = None
+        for f in files or []:
+            if f.file_id in state.reports or f.file_id in errors:
+                continue  # 올린 파일은 한 번만 읽는다
             try:
-                previous = coach.parse_report(uploaded.getvalue().decode("utf-8", errors="replace"))
+                data = coach.parse_report(f.getvalue().decode("utf-8", errors="replace"))
             except ValueError as e:
-                state.previous = None
-                st.error(str(e))
-            else:
-                if previous["profile"]["job"] != job:
-                    state.previous = None
-                    st.warning(
-                        f"이 리포트는 '{previous['profile']['job']}' 직군이에요. "
-                        "사이드바의 '직군 다시 고르기' 에서 그 직군을 골라 주세요."
-                    )
-                else:
-                    state.previous = previous
-                    for field in ("name", "company", "company_desc", "experience"):
-                        state[f"f_{field}"] = previous["profile"][field]
-                    # 경험 칸 글자 수 상한에 맞춘다 (상한보다 긴 값을 넣으면 칸이 에러를 낸다)
-                    state.f_experience = state.f_experience[: coach.MAX_EXPERIENCE_CHARS]
-                    st.rerun()
+                errors[f.file_id] = f"{f.name}: {e}"
+                continue
+            if data["profile"]["job"] != job:
+                errors[f.file_id] = (
+                    f"{f.name}: '{data['profile']['job']}' 직군 리포트예요. "
+                    "상태창의 '직군 다시 고르기' 에서 그 직군을 골라 주세요."
+                )
+                continue
+            state.reports[f.file_id] = {**data, "file_name": f.name}
+            newest = f.file_id
+        for f in files or []:
+            if f.file_id in errors:
+                st.warning(errors[f.file_id])
+        if newest:
+            activate_report(newest)  # 마지막으로 올린 리포트로 이어 한다
+            st.rerun()
+        if len(job_reports()) > 1:
+            st.caption("📂 리포트를 여러 개 불러왔어요. 왼쪽 상태창에서 눌러 회사를 바꿀 수 있어요.")
 
         previous = state.get("previous")
         if previous:
             st.success(
-                f"{previous['round']}회차({previous['date']}) 면접을 불러왔어요. "
+                f"**{previous['profile']['company']}** {previous['round']}회차({previous['date']}) 면접을 불러왔어요. "
                 f"이번 면접은 {coach.next_round(previous)}회차로 기록돼요. 아래 칸을 채웠으니 확인해 주세요."
             )
             if previous["precheck"]:
@@ -240,12 +344,13 @@ if state.stage == "start":
                 matched = coach.match_questions(bank, job, previous["questions"]) if same else None
                 if same and matched is None:
                     state.notice = "지난 질문 중 질문 은행에 없는 질문이 있어서 새 질문으로 시작했어요."
-                questions = matched or coach.pick_questions(bank, job)
+                questions = matched or coach.pick_questions(bank, job, state.get("field", coach.DEFAULT_FIELD))
             except (OSError, ValueError, KeyError):
                 st.error("질문 은행(data/questions.csv)을 읽지 못했어요.")
             else:
                 state.profile = {
                     "name": name,
+                    "field": state.get("field", coach.DEFAULT_FIELD),
                     "job": job,
                     "company": company,
                     "company_desc": company_desc,
@@ -282,9 +387,16 @@ if state.stage == "briefing":
     st.title("면접 브리핑")
     with st.container(border=True):
         st.markdown(f"**🏢 회사** · {profile['company']} ({profile['company_desc']})")
+        st.markdown(f"**🧭 분야** · {coach.field_of(profile)} ({FIELDS[coach.field_of(profile)]})")
         st.markdown(f"**💼 직군** · {profile['job']} 신입 · {state.round}회차")
         st.markdown(f"**{AVATARS['assistant']} 면접관** · {coach.persona_summary(profile['job'])}")
-        kinds = " → ".join(q["type"] for q in state.questions)
+        kinds = " → ".join(
+            q["type"] + (" 🧭" if q.get("field", coach.DEFAULT_FIELD) != coach.DEFAULT_FIELD else "")
+            for q in state.questions
+        )
+        field_count = sum(1 for q in state.questions if q.get("field", coach.DEFAULT_FIELD) != coach.DEFAULT_FIELD)
+        if field_count:
+            kinds += f" · 🧭 {coach.field_of(profile)} 분야 질문 {field_count}개"
         st.markdown(f"**📝 질문** · {coach.TOTAL_QUESTIONS}개 ({kinds})")
         if state.get("same_questions"):
             st.caption("지난 회차와 같은 질문이에요. 평가 후 질문별로 점수를 비교해 드려요.")
@@ -298,7 +410,7 @@ if state.stage == "briefing":
     if begin_col.button("면접을 시작하겠습니다.", type="primary", width="stretch"):
         state.stage = "interview"
         st.rerun()
-    if back_col.button("← 설정 고치기", width="stretch"):
+    if back_col.button("설정 수정하기", width="stretch"):
         for field in ("name", "company", "company_desc", "experience"):
             state[f"f_{field}"] = profile[field]  # 입력한 값을 그대로 다시 채운다
         state.stage = "start"
@@ -310,13 +422,14 @@ if state.stage == "briefing":
 profile = state.profile
 for state_key, empty in (
     ("highlights", {}), ("last_suggest", None), ("last_question", None), ("previous", None), ("round", 1),
-    ("strategies", {}), ("retry_counts", {}), ("verdict_open", False),
+    ("strategies", {}), ("retry_counts", {}), ("verdict_open", False), ("memo_results", {}), ("memo_best", {}),
+    ("speak_logs", {}), ("reports", {}), ("memo_edits", {}), ("memo_reviews", {}),
 ):
     if state_key not in state:  # 이 기능이 생기기 전에 시작한 세션도 열리게
         state[state_key] = empty
 if state.get("notice"):
     st.info(state.pop("notice"))
-st.title(f"{profile['company']} · {profile['job']} 신입 면접 · {state.round}회차")
+st.title(f"{profile['company']} · {coach.field_of(profile)} · {profile['job']} 신입 면접 · {state.round}회차")
 
 def show_messages():
     for message in state.messages:
@@ -857,8 +970,453 @@ def show_verdict(ev: dict):
         st.rerun()
 
 
+# ── 암기 시뮬레이션: 핵심어 뽑기 · 빈칸 · 채점은 모두 coach.py 규칙 (AI 호출 없음) ──
+WEEKDAYS = "월화수목금토일"
+MEMO_CSS = f"""<style>
+.mm {{ line-height: 2.1; }}
+.mm .key {{ color: {HIGHLIGHT_TEXT}; background: #E3ECFF; border-radius: 4px; padding: 1px 6px; margin: 0 3px 3px 0;
+  display: inline-block; font-size: .92em; }}
+.mm .blank {{ color: transparent; border-bottom: 2px solid currentColor; border-bottom-color: #9AA0A6; padding: 0 2px; }}
+.mm .shown {{ color: {HIGHLIGHT_TEXT}; background: #FFE45C; border-radius: 3px; padding: 0 2px; }}
+.mm .kw {{ color: {HIGHLIGHT_TEXT}; background: #E3ECFF; border-radius: 3px; padding: 0 3px; font-weight: 600; }}
+.mm .rest {{ color: #8A8F98; }}
+.mm .sline {{ padding: 2px 6px; margin-bottom: 4px; }}
+.mm .sgap {{ color: {HIGHLIGHT_TEXT}; background: #FFD6D6; border-left: 4px solid #D93025; border-radius: 4px;
+  padding: 2px 6px; margin-bottom: 4px; }}
+.mm .legend .sgap {{ display: inline; padding: 0 4px; border-left-width: 3px; }}
+.mm .legend {{ font-size: .85em; }}
+</style>"""
+
+
+# 말하기 중 경과 시간 표시 (브라우저에서 1초마다). __ELAPSED__ = 서버가 잰 경과(ms), __START__ = 시작 시각.
+# 주황(#E8590C)은 밝은 · 어두운 화면 모두에서 읽힌다.
+SPEAK_TIMER_HTML = """<div id="t" style="font:600 1.2rem system-ui,sans-serif;color:#E8590C"></div>
+<script>
+const s = Date.now() - __ELAPSED__;
+const el = document.getElementById("t");
+function tick() {
+  const e = Math.floor((Date.now() - s) / 1000);
+  el.textContent = "⏺ 말하는 중 · 시작 __START__ · "
+    + String(Math.floor(e / 60)).padStart(2, "0") + ":" + String(e % 60).padStart(2, "0");
+}
+tick(); setInterval(tick, 250);
+</script>"""
+
+
+def latest_answer(no: int) -> str:
+    """재도전했으면 마지막 재도전 답, 아니면 면접 때 답."""
+    retry = state.retries.get(no)
+    return retry["answer"] if retry else coach.answer_text(state.messages, no - 1)
+
+
+def key_chips(keys: list[str], css: str = "key") -> str:
+    return "".join(f'<span class="{css}">{html.escape(k)}</span>' for k in keys) or "<small>(핵심어 없음)</small>"
+
+
+def go_memo_step(index: int):
+    """단계별 연습: MEMO_STEPS[index] 로 옮긴다 (모드 · 빈칸 단계는 다음 실행에서 그리기 전에 정한다)."""
+    state.go_memo = index
+    st.rerun()
+
+
+def timer_buttons(key: str, phase: str):
+    """한 단계의 타이머 버튼. 재는 중에는 '▶ 시작' 자리가 '✕ 취소'(기록하지 않고 끝내기)로 바뀐다.
+    '■ 완료' 는 기록하고 끝낸다. 시작 · 완료 시각과 걸린 시간은 서버 시각으로 잰다."""
+    timer = state.get("speak_timer")
+    running = bool(timer) and timer["key"] == key and timer["phase"] == phase
+    start_col, stop_col = st.columns(2)
+    if running:
+        # 시작과 취소는 다른 key 라서, 시작을 누른 다음 실행에서 취소가 눌린 것으로 잡히지 않는다
+        if start_col.button("✕ 취소", key=f"speak_cancel_{phase}_{key}", width="stretch",
+                            help="기록하지 않고 타이머를 끝내요."):
+            state.speak_timer = None
+            st.rerun()
+    elif start_col.button("▶ 시작", key=f"speak_start_{phase}_{key}", width="stretch", type="primary"):
+        state.speak_timer = {"key": key, "phase": phase, "t": time.time(), "label": user_now().strftime("%H:%M:%S")}
+        st.rerun()
+    if stop_col.button("■ 완료", key=f"speak_stop_{phase}_{key}", width="stretch",
+                       type="primary" if running else "secondary", help="걸린 시간을 기록하고 끝내요."):
+        if not running:
+            st.info("먼저 이 단계의 '▶ 시작' 을 눌러 주세요.")
+        else:
+            log = {
+                "시작": timer["label"],
+                "완료": user_now().strftime("%H:%M:%S"),
+                "걸린 시간(초)": round(time.time() - timer["t"]),
+            }
+            logs = speak_logs_for(key)
+            logs[phase] = ([log] + logs.get(phase, []))[: coach.SPEAK_LOG_KEEP]
+            state.speak_logs[key] = logs
+            state.speak_timer = None
+            st.rerun()
+    if running:
+        # 서버 기준 경과를 넘겨서 브라우저 시계와 서버 시계가 달라도 같은 시간을 보여 준다.
+        # st.iframe 은 스크립트를 실행하므로 사용자 글 · AI 출력은 넣지 않는다 (숫자와 서버 시각만 넣음).
+        elapsed_ms = int((time.time() - timer["t"]) * 1000)
+        st.iframe(
+            SPEAK_TIMER_HTML.replace("__ELAPSED__", str(elapsed_ms)).replace("__START__", timer["label"]),
+            height=40,
+        )
+    return running
+
+
+def skeleton_html(text: str) -> str:
+    """뼈대: 문장마다 핵심어 칩."""
+    parts = [f'<div>{i}. {key_chips(item["keys"])}</div>' for i, item in enumerate(coach.skeleton(text), 1)]
+    return MEMO_CSS + '<div class="mm">' + "".join(parts) + "</div>"
+
+
+def cloze_html(text: str, level: int, reveal: bool = False) -> str:
+    """빈칸: 가린 핵심어는 밑줄만 (reveal 이면 노랗게 보여 줌)."""
+    words = []
+    for word, hidden in coach.cloze(text, level):
+        css = ("shown" if reveal else "blank") if hidden else ""
+        words.append(f'<span class="{css}">{html.escape(word)}</span>' if css else html.escape(word))
+    return MEMO_CSS + '<div class="mm">' + " ".join(words) + "</div>"
+
+
+def go_speak_phase(phase: str):
+    """말하기 모드: 그 단계(· 힌트)로 옮긴다 (다음 실행에서 그리기 전에 정한다)."""
+    state.go_speak = phase
+    st.rerun()
+
+
+def speak_logs_for(key: str) -> dict:
+    logs = state.speak_logs.get(key, {})
+    if isinstance(logs, list):  # 단계가 나뉘기 전 기록은 '대본 없이 말하기' 로 본다
+        logs = {"speak": logs}
+    return logs
+
+
+def show_speaking(key: str, text: str, question: str):
+    """🗣️ 말하기 모드: 1단계 대본 읽기 → 2단계 힌트(뼈대 → 빈칸 가볍게 · 절반 · 전부) → 3단계 대본 없이.
+    단계마다 타이머로 재고, 1단계 읽기 시간과 비교한다."""
+    if state.get("speak_step") not in coach.SPEAK_STEP_NAMES:
+        state.speak_step = 1
+    step = st.segmented_control(
+        "말하기 단계", list(coach.SPEAK_STEP_NAMES), key="speak_step", required=True,
+        format_func=coach.SPEAK_STEP_NAMES.get, label_visibility="collapsed", width="stretch",
+    )
+
+    hint = None
+    if step == 1:
+        st.caption("대본을 소리 내어 읽으며 재요. 내 읽기 속도를 구하고, 2 · 3단계 시간과 비교해요.")
+    elif step == 2:
+        if state.get("speak_hint") not in coach.SPEAK_HINTS:
+            state.speak_hint = "skeleton"
+        hint = st.segmented_control(
+            "힌트", list(coach.SPEAK_HINTS), key="speak_hint", required=True, format_func=coach.SPEAK_HINTS.get,
+            help="뼈대 → 🟢 가볍게 → 🟡 절반 → 🔴 전부 순서로 힌트를 줄여 가며 말해 보세요.",
+        )
+        st.caption("아래 힌트만 보고 소리 내어 말하며 재요.")
+    else:
+        st.caption("대본을 가리고 기억나는 대로 말하며 재요.")
+    phase = coach.speak_phase(step, hint)
+
+    running = timer_buttons(key, phase)
+    if step == 1:
+        if running:
+            with st.container(border=True):
+                st.write(text)
+        else:
+            st.caption("▶ 시작을 누르면 대본이 보여요.")
+    elif step == 2:
+        st.html(skeleton_html(text) if hint == "skeleton" else cloze_html(text, hint))
+
+    logs = speak_logs_for(key)
+    read_s = logs["read"][0]["걸린 시간(초)"] if logs.get("read") else None
+    if logs.get(phase):
+        for kind, message in coach.phase_feedback(read_s, logs[phase][0]["걸린 시간(초)"], phase, text, question):
+            getattr(st, kind)(message)
+
+    # 지금까지 잰 단계별 최근 시간 (1단계 읽기 대비)
+    progress = []
+    for p in coach.SPEAK_PHASES:
+        if logs.get(p):
+            seconds = logs[p][0]["걸린 시간(초)"]
+            versus = f"{(seconds - read_s) / read_s * 100:+.0f}%" if read_s and p != "read" else "-"
+            progress.append({"단계": coach.phase_label(p), "최근 시간(초)": seconds, "읽기 대비": versus})
+    if progress:
+        st.markdown("**단계별 기록**")
+        st.table(progress, hide_index=True)
+
+    following = coach.next_phase(phase)
+    if following and st.button(f"다음 단계로 ▶ {coach.phase_label(following)}", key=f"speak_next_{phase}"):
+        go_speak_phase(following)
+
+
+def show_memo_strategy():
+    try:
+        st.markdown(coach.load_memo_strategy())
+    except OSError:
+        st.error("암기 전략 문서(data/암기전략.md)를 읽지 못했어요.")
+    st.markdown("**복습 일정**")
+    for label, day in coach.review_schedule(user_now().date()):
+        st.markdown(f"- {label}: {day.month}월 {day.day}일 ({WEEKDAYS[day.weekday()]})")
+
+
+def show_memo_skeleton(no: int, source: str, text: str):
+    st.caption(f"🗣️ 소리 내어 말하면 약 **{coach.speak_seconds(text)}초** 걸려요. 핵심어만 보고 소리 내어 답해 보세요.")
+    # 스위치: 끄면 뼈대(핵심어)만, 켜면 전체 문장에서 빠진 내용을 회색으로 함께
+    full = st.toggle(
+        "전체 문장 함께 보기", key=f"memo_full_{no}_{source}",
+        help="끄면 뼈대(핵심어)만 보여요. 켜면 핵심어 사이에 빠진 내용을 회색으로 함께 보여 줘요.",
+    )
+    if full:
+        rows = []
+        for i, sentence in enumerate(coach.split_sentences(text), 1):
+            words = [
+                f'<span class="{"kw" if kind == "key" else "rest"}">{html.escape(w)}</span>'
+                for w, kind in coach.mark_words(sentence)
+            ]
+            rows.append(f"<div>{i}. {' '.join(words)}</div>")
+        st.html(MEMO_CSS + '<div class="mm">' + "".join(rows)
+                + '<div class="legend"><span class="kw">핵심어</span> · <span class="rest">회색은 빠진 내용</span></div></div>')
+    else:
+        st.html(skeleton_html(text))
+
+
+def show_memo_cloze(no: int, source: str, text: str) -> int:
+    if state.get("memo_level") not in coach.MEMO_TAGS:
+        state.memo_level = 1  # 태그는 하나가 꼭 골라져 있게 (기본: 가볍게)
+    level = st.segmented_control(
+        "가리는 양", options=list(coach.MEMO_TAGS), key="memo_level", required=True,
+        format_func=coach.MEMO_TAGS.get,
+        help="🟢 핵심어 4개 중 1개 · 🟡 절반 · 🔴 핵심어 전부를 가려요.",
+    )
+    reveal = st.toggle("정답 보기", key=f"memo_reveal_{no}_{source}_{level}")
+    st.html(cloze_html(text, level, reveal))
+    hidden_count = sum(1 for _, h in coach.cloze(text, level) if h)
+    st.caption(f"빈칸 {hidden_count}개 · 빈칸에 들어갈 말을 소리 내어 말한 뒤 '정답 보기' 로 확인해 보세요.")
+    return level
+
+
+def sentence_lines(rows: list[str]) -> str:
+    return MEMO_CSS + '<div class="mm">' + "".join(rows) + "</div>"
+
+
+def show_memo_simulation(result_key: str, question: dict, text: str):
+    with st.chat_message("assistant", avatar=AVATARS["assistant"]):
+        st.markdown(question["question"])
+    attempt = st.text_area(
+        "기억나는 대로 답해 보세요 (원래 답은 가려져 있어요)", height=160,
+        key=f"memo_try_{result_key}", max_chars=coach.MAX_ANSWER_CHARS,
+    )
+    if st.button("확인하기", type="primary", key=f"memo_check_{result_key}"):
+        if not attempt.strip():
+            st.info("기억나는 대로 적은 뒤 눌러 주세요.")
+        else:
+            check = {
+                **coach.recall_check(text, attempt),
+                "sentences": coach.sentence_recall(text, attempt),
+                "attempt": attempt.strip(),
+            }
+            state.memo_results[result_key] = check
+            state.memo_best[result_key] = max(state.memo_best.get(result_key, 0), check["recall"])
+    check = state.memo_results.get(result_key)
+    if not check:
+        return
+
+    written = check.get("attempt", attempt)  # 이 칸이 생기기 전 기록은 지금 칸의 글
+    sentences = check.get("sentences") or coach.sentence_recall(text, written)
+    judged = [row for row in sentences if row["remembered"] is not None]
+    remembered = sum(1 for row in judged if row["remembered"])
+    rate_col, sentence_col, best_col = st.columns(3)
+    rate_col.metric("핵심어 기억", f"{check['recall']}%", help=f"{len(check['found'])}/{check['total']}개")
+    sentence_col.metric("문장 기억", f"{remembered}/{len(judged)}")
+    best_col.metric("이 답 최고 기록", f"{state.memo_best.get(result_key, 0)}%")
+    st.progress(check["recall"] / 100)
+    back = coach.fallback_step(check["recall"])
+    if back is None:
+        st.success(f"핵심어를 {coach.MEMO_PASS}% 넘게 기억했어요. 다음 질문으로 넘어가도 좋아요.")
+    else:
+        # 생각보다 덜 외워졌으면 낮은 단계부터 다시
+        st.warning(
+            f"생각보다 덜 외워졌어요 ({check['recall']}%). "
+            f"**{coach.step_label(back)}** 부터 다시 연습하고 돌아오세요."
+        )
+        if st.button(f"⏪ {coach.step_label(back)} 부터 다시", key=f"memo_back_{result_key}", type="primary"):
+            go_memo_step(back)
+
+    # 원래 답(왼쪽) · 내가 쓴 답(오른쪽)을 문장마다 한 줄씩 나란히. 기억 못 한 원래 문장만 칠한다.
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**원래 답**")
+        st.html(sentence_lines([
+            f'<div class="{"sgap" if row["remembered"] is False else "sline"}">{i}. {html.escape(row["sentence"])}</div>'
+            for i, row in enumerate(sentences, 1)
+        ]))
+    with right:
+        st.markdown("**내가 쓴 답**")
+        st.html(sentence_lines([
+            f'<div class="sline">{i}. {html.escape(s)}</div>' for i, s in enumerate(coach.split_sentences(written), 1)
+        ]))
+    st.html(MEMO_CSS + f'<div class="mm"><div class="legend"><span class="sgap">칠한 문장</span> = 그 문장 핵심어를 '
+            f"{round(coach.SENTENCE_RECALL * 100)}% 미만으로 쓴 원래 문장</div></div>")
+
+
+TEXT_MODE, SPEAK_MODE = "✍️ 텍스트 모드", "🗣️ 말하기 모드"
+
+
+def show_script_editor(no: int, result_key: str, original: str, text: str, ev: dict | None):
+    """✏️ 대본 고치기: 말해 보니 어색한 곳을 바로 고친다. 저장하면 모든 연습 단계가 고친 대본을 쓴다.
+    '수정하고 재도전 검토 받기' 는 재도전 탭과 같은 RETRY 채점 · 같은 횟수 상한을 쓴다 (AI 1번)."""
+    draft_key = f"memo_draft_{result_key}"
+    if state.pop("memo_draft_reset", None) == result_key or draft_key not in state:
+        state[draft_key] = text  # 칸을 그리기 전에만 값을 바꿀 수 있다
+    edited = result_key in state.memo_edits
+    label = "✏️ 대본 고치기" + (" · 고친 대본으로 연습 중" if edited else "")
+    if not st.toggle(label, key=f"memo_edit_on_{result_key}",
+                     help="말해 보니 어색한 곳이 있으면 켜서 바로 고쳐요."):
+        show_review_result(result_key)
+        return
+
+    draft = st.text_area("대본", key=draft_key, height=180, max_chars=coach.MAX_ANSWER_CHARS)
+    save_col, review_col, undo_col = st.columns([1, 1.4, 1])
+    if save_col.button("💾 고친 대본 저장", key=f"memo_save_{result_key}", width="stretch"):
+        if not draft.strip():
+            st.info("대본을 적은 뒤 저장해 주세요.")
+        else:
+            state.memo_edits[result_key] = draft.strip()
+            state.memo_results.pop(result_key, None)  # 대본이 바뀌었으니 지난 채점은 지운다
+            st.rerun()
+    if review_col.button("🔁 수정하고 재도전 검토 받기", key=f"memo_review_{result_key}", type="primary", width="stretch"):
+        used = state.retry_counts.get(no, 0)
+        if not draft.strip():
+            st.info("대본을 적은 뒤 눌러 주세요.")
+        elif not ev:
+            st.info("위원 4명에게 평가받은 뒤에 재도전 검토를 받을 수 있어요. 💬 면접 탭의 '위원 4명에게 평가받기' 를 눌러 주세요.")
+        elif used >= coach.MAX_RETRIES:
+            st.info(f"이 질문은 재도전 검토를 {coach.MAX_RETRIES}번 모두 받았어요. 고친 대본은 저장해서 연습할 수 있어요.")
+        else:
+            last = ev["answers"][no - 1]
+            new_answer = draft.strip()
+
+            def store(raw):
+                state.memo_edits[result_key] = new_answer
+                state.retries[no] = {"answer": new_answer, **coach.summarize_retry(raw)}
+                state.retry_counts[no] = used + 1
+                state.memo_results.pop(result_key, None)
+                state.memo_reviews[result_key] = coach.compare(last["scores"], state.retries[no]["scores"])
+
+            if call_ai(
+                "고친 대본을 채점하고 있어요...",
+                coach.build_retry(profile, state.questions[no - 1], coach.answer_text(state.messages, no - 1), last["weak"]),
+                new_answer, RETRY_SCHEMA, "retry", store,
+            ):
+                st.rerun()
+    if undo_col.button("↩ 원래대로", key=f"memo_undo_{result_key}", width="stretch"):
+        state.memo_edits.pop(result_key, None)
+        state.memo_results.pop(result_key, None)
+        state.memo_draft_reset = result_key
+        st.rerun()
+    st.caption(
+        f"재도전 검토는 🔁 재도전 탭과 같은 기준으로 채점하고, 질문당 {coach.MAX_RETRIES}번까지예요 "
+        f"(지금 {state.retry_counts.get(no, 0)}번). 검토를 받으면 이 답이 내 최신 답이 되어 종합 점수 · 리포트에 반영돼요."
+    )
+    show_review_result(result_key)
+
+
+def show_review_result(result_key: str):
+    """'수정하고 재도전 검토 받기' 결과 (전 → 후). 자세한 건 재도전 탭에서."""
+    diff = state.memo_reviews.get(result_key)
+    if not diff:
+        return
+    message = f"재도전 검토: {diff['before']} → {diff['after']}점 ({diff['diff']:+d})"
+    if diff["diff"] > 0:
+        st.success(f"🎉 역전 성공! {message}")
+    elif diff["diff"] == 0:
+        st.info(message)
+    else:
+        st.warning(message + " · 재도전 탭에서 약한 점과 전략 가이드를 확인해 보세요.")
+    if st.button("🔁 재도전 탭에서 자세히 보기", key=f"memo_review_go_{result_key}"):
+        state.go_retry_no = int(result_key.split(":")[0])
+        state.go_tab = RETRY_TAB
+        st.rerun()
+
+
+def show_memorize():
+    st.subheader("🧠 암기 시뮬레이션")
+    st.caption("AI를 부르지 않아요. 핵심어는 간단한 규칙(조사를 뗀 3글자 이상 · 숫자가 든 단어)으로 뽑아서 완벽하지 않을 수 있어요.")
+
+    # 단계 이동 표시가 있으면 모드 · 단계 · 빈칸 양을 그리기 전에 정한다.
+    if "go_memo" in state:
+        step_mode, step_level = coach.MEMO_STEPS[state.pop("go_memo")]
+        state.memo_top = TEXT_MODE
+        state.memo_view = coach.MEMO_MODES[step_mode]
+        if step_level:
+            state.memo_level = step_level
+    if "go_speak" in state:
+        step, hint = coach.phase_step(state.pop("go_speak"))
+        state.memo_top = SPEAK_MODE
+        state.speak_step = step
+        if hint is not None:
+            state.speak_hint = hint
+
+    ev = state.evaluation
+    scores = {}
+    if ev:
+        totals_by_no = {a["no"]: a["score"] for a in ev["answers"]}
+        scores = {no: state.retries[no]["score"] if no in state.retries else s for no, s in totals_by_no.items()}
+    labels = {
+        i + 1: f"질문 {i + 1}" + (f" · {scores[i + 1]}/{coach.ANSWER_MAX}점" if i + 1 in scores else "") + f" · {q['question']}"
+        for i, q in enumerate(state.questions)
+    }
+    question_col, source_col = st.columns([3, 2])
+    no = question_col.selectbox("외울 질문", list(labels), format_func=labels.get, key="memo_no")
+    question = state.questions[no - 1]
+    sources = {"내 최신 답": latest_answer(no)}
+    if ev and ev["answers"][no - 1]["needs_rewrite"] and ev["answers"][no - 1]["rewrite"].strip():
+        sources["AI 고친 답"] = ev["answers"][no - 1]["rewrite"]
+    source = source_col.radio("외울 답", list(sources), horizontal=True, key=f"memo_source_{no}",
+                              help="AI 고친 답은 14점 미만인 답에만 있어요.")
+    result_key = f"{no}:{source}"
+    original = sources[source].strip()
+    text = state.memo_edits.get(result_key, original).strip()  # 고친 대본이 있으면 그걸로 외운다
+    if not text:
+        st.info("이 질문에는 외울 답이 없어요.")
+        return
+    show_script_editor(no, result_key, original, text, ev)
+
+    # 상위 모드: 텍스트 모드 / 말하기 모드. 외우는 전략은 두 모드 공통이라 작은 버튼으로.
+    mode_col, strategy_col = st.columns([4, 1], vertical_alignment="bottom")
+    if state.get("memo_top") not in (TEXT_MODE, SPEAK_MODE):
+        state.memo_top = TEXT_MODE
+    with mode_col:
+        top = st.segmented_control("모드", [TEXT_MODE, SPEAK_MODE], key="memo_top", required=True, width="stretch")
+    with strategy_col.popover("📌 전략", width="stretch"):
+        show_memo_strategy()
+    st.divider()
+
+    if top == SPEAK_MODE:
+        show_speaking(result_key, text, question["question"])
+        return
+
+    # 텍스트 모드: 누른 단계의 기능만 보인다
+    if state.get("memo_view") not in coach.MEMO_MODES:
+        state.memo_view = coach.MEMO_MODES[0]
+    view = st.segmented_control(
+        "텍스트 단계", coach.MEMO_MODES, key="memo_view", required=True, label_visibility="collapsed", width="stretch",
+    )
+    mode_index = coach.MEMO_MODES.index(view)
+    level = None
+    if mode_index == 0:
+        show_memo_skeleton(no, source, text)
+    elif mode_index == 1:
+        level = show_memo_cloze(no, source, text)
+    else:
+        show_memo_simulation(result_key, question, text)
+
+    # 지금 단계가 익숙해지면 다음 단계로
+    following = coach.next_step(mode_index, level)
+    if following is not None and st.button(
+        f"다음 단계로 ▶ {coach.step_label(following)}", key=f"memo_next_{mode_index}_{level}"
+    ):
+        go_memo_step(following)
+
+
 CHAT_TAB, EVAL_TAB, RETRY_TAB = "💬 면접", "📊 평가", "🔁 재도전"
-LAST_TAB, VERDICT_TAB, REPORT_TAB = "🙋 마지막 질문", "📨 최종 결과", "📄 리포트"
+LAST_TAB, VERDICT_TAB, MEMO_TAB, REPORT_TAB = "🙋 마지막 질문", "📨 최종 결과", "🧠 암기", "📄 리포트"
 
 # 탭 · 재도전 질문을 바꾸라는 표시가 있으면, 그리기 전에 정한다 (그린 뒤에는 바꿀 수 없음).
 if state.get("go_tab"):
@@ -868,8 +1426,8 @@ if state.get("go_retry_no"):
 
 # 탭은 면접 시작부터 항상 같은 모양 · 같은 key 로 둔다. 화면 구조가 바뀌면
 # Streamlit이 대화를 다시 그리면서 스크롤이 맨 위로 올라가기 때문이다.
-chat_tab, eval_tab, retry_tab, last_tab, verdict_tab, report_tab = st.tabs(
-    [CHAT_TAB, EVAL_TAB, RETRY_TAB, LAST_TAB, VERDICT_TAB, REPORT_TAB], key="view", on_change="rerun"
+chat_tab, eval_tab, retry_tab, last_tab, verdict_tab, memo_tab, report_tab = st.tabs(
+    [CHAT_TAB, EVAL_TAB, RETRY_TAB, LAST_TAB, VERDICT_TAB, MEMO_TAB, REPORT_TAB], key="view", on_change="rerun"
 )
 
 with chat_tab:
@@ -922,6 +1480,12 @@ with verdict_tab:
         show_verdict(state.evaluation)
     else:
         st.info("위원 4명에게 평가받으면 최종 결과를 확인할 수 있어요.")
+
+with memo_tab:
+    if state.stage == "done":
+        show_memorize()
+    else:
+        st.info("면접을 마치면 내 답을 외우는 연습을 할 수 있어요.")
 
 with report_tab:
     if state.evaluation:
