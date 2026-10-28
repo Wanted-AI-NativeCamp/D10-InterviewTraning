@@ -45,43 +45,49 @@ def hover_css() -> str:
 [data-testid^="stBaseButton-"]:not([data-testid="stBaseButton-primary"]):not([data-testid$="Active"]):hover:not(:disabled) {{
   background-color: color-mix(in srgb, currentColor 6%, transparent) !important; color: inherit !important; }}
 [data-testid="stTabs"] [role="tab"]:not([aria-selected="true"]):hover {{ color: inherit !important; }}
-#jump-buttons {{ position: fixed; right: 16px; bottom: 112px; z-index: 999990; display: flex; flex-direction: column; gap: 8px; }}
-#jump-buttons button {{ width: 44px; height: 44px; border-radius: 22px; border: none; cursor: pointer;
-  background: {accent}; color: #FFFFFF; display: grid; place-items: center; box-shadow: 0 2px 8px rgba(0,0,0,.18); }}
-#jump-buttons button:focus-visible {{ outline: 3px solid {heading}; outline-offset: 2px; }}
-#jump-buttons svg {{ width: 22px; height: 22px; }}
+/* 면접 화면 내 답 말풍선: 오른쪽 여백을 16px → 32px (글이 오른쪽 끝에 붙어 보이지 않게) */
+[data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) {{ padding-right: 32px !important; }}
+/* 암기 탭 질문 카드: 좁은 화면에서도 < 질문 > 을 한 줄로 (Streamlit 은 640px 아래에서 칸을 세로로 쌓는다) */
+/* < 윗줄 > 은 카드 양끝이 아니라 윗줄 글 바로 옆에 30px 띄워 가운데로 모은다 */
+.st-key-memo_qcard [data-testid="stHorizontalBlock"] {{ flex-wrap: nowrap !important; justify-content: center; gap: 30px !important; }}
+.st-key-memo_qcard [data-testid="stColumn"]:nth-child(2) {{ flex: 0 1 auto !important; width: auto !important; }}
+.st-key-memo_qcard [data-testid="stColumn"] {{ min-width: 0 !important; }}
+.st-key-memo_qcard [data-testid="stColumn"]:first-child, .st-key-memo_qcard [data-testid="stColumn"]:last-child {{
+  flex: 0 0 44px !important; width: 44px !important; }}
+.st-key-memo_qcard [data-testid="stColumn"]:nth-child(2) [data-testid="stCaptionContainer"] {{ text-align: center; }}
+.st-key-memo_qcard h4 {{ text-align: center; word-break: keep-all; }}  /* 한국어는 어절 단위로 줄바꿈 */
 </style>"""
 
 
 st.html(hover_css())
 
-# 플로팅 버튼: 맨 위로 · 맨 아래로 (Streamlit 에 스크롤 기능이 없어서 짧은 스크립트로).
-# 고정 문장만 넣는다 — 사용자 글 · AI 출력 · 키는 넣지 않는다. 버튼은 한 번만 만들고(id 확인) 색은 hover_css 가 정한다.
-JUMP_BUTTONS_JS = """<script>
+# 남는 도움말 닫기: 버튼을 누르면 Streamlit 이 버튼을 새로 그리는데, 그때 열려 있던 도움말(help)은
+# '마우스가 떠났다' 신호를 받지 못해 화면에 남는다 (암기 탭 < > 에서 재현). 마우스가 도움말 버튼에도,
+# 도움말 위에도 없는데 보이는 도움말은 숨긴다. 고정 문장만 넣는다 — 사용자 글 · AI 출력 · 키는 넣지 않는다.
+# (스크립트 글에 태그 모양 글자가 있으면 Streamlit 정리기가 스크립트를 통째로 지우므로 쓰지 않는다)
+TOOLTIP_GUARD_JS = """<script>
 (() => {
-  if (document.getElementById("jump-buttons")) return;
-  const scroller = () => [...document.querySelectorAll('[data-testid="stAppScrollToBottomContainer"], [data-testid="stMain"], [data-testid="stAppViewContainer"]'),
-    document.scrollingElement].find(el => el && el.scrollHeight > el.clientHeight + 1) || document.scrollingElement;
-  const go = (toBottom) => {
-    const el = scroller();
-    const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
-    el.scrollTo({ top: toBottom ? el.scrollHeight : 0, behavior });
-  };
-  const icon = (d) => '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="' + d + '"/></svg>';
-  const box = document.createElement("div");
-  box.id = "jump-buttons";
-  [["맨 위로", false, "M12 8l-6 6 1.4 1.4L12 10.8l4.6 4.6L18 14z"], ["맨 아래로", true, "M12 16l6-6-1.4-1.4L12 13.2 7.4 8.6 6 10z"]]
-    .forEach(([label, toBottom, d]) => {
-      const b = document.createElement("button");
-      b.type = "button"; b.title = label; b.setAttribute("aria-label", label);
-      b.innerHTML = icon(d);
-      b.addEventListener("click", () => go(toBottom));
-      box.appendChild(b);
+  if (window.__tooltipGuard) return;
+  window.__tooltipGuard = true;
+  let x = -1, y = -1, timer = 0;
+  // 도움말 버튼 칸은 aria-describedby 로 자기 도움말 id 를 가리킨다: 마우스가 그 버튼이나 그 도움말 위일 때만 보인다
+  const check = () => {
+    const over = x >= 0 ? document.elementFromPoint(x, y) : null;
+    const target = over && over.closest('[data-testid="stTooltipHoverTarget"]');
+    const hoveredTip = over && over.closest('[role="tooltip"]');
+    const mine = target ? target.getAttribute("aria-describedby") : null;
+    document.querySelectorAll('[role="tooltip"]').forEach((tip) => {
+      tip.style.display = (tip.id && tip.id === mine) || tip === hoveredTip ? "" : "none";
     });
-  document.body.appendChild(box);
+  };
+  const later = (ms) => { clearTimeout(timer); timer = setTimeout(check, ms); };
+  document.addEventListener("pointermove", (e) => { x = e.clientX; y = e.clientY; later(250); }, true);
+  document.addEventListener("click", () => later(700), true);
+  document.addEventListener("scroll", () => later(250), true);
 })();
 </script>"""
-st.html(JUMP_BUTTONS_JS, unsafe_allow_javascript=True)
+st.html(TOOLTIP_GUARD_JS, unsafe_allow_javascript=True)
+
 
 
 def scroll_to_top():
@@ -310,7 +316,12 @@ def resume_without_interview(previous: dict, name, job, company, company_desc, e
     for key in ("messages", "evaluation", "retries", "retry_history", "retry_counts", "last_suggest", "last_question", "understanding"):
         state[key] = session[key]
     state.highlights, state.strategies = {}, {}
-    state.pop("clue_set", None); state.pop("clue_round", None)
+    state.memo_edits, state.memo_reviews = {}, {}  # 검토 내역은 retry_history 의 몇 번째인지라 새 기록과 맞지 않는다
+    # 실마리: 리포트에 저장돼 있으면 그 회차 · 목록에서 이어 간다 (없으면 1회차 · 새로 찾기)
+    state.pop("clue_set", None)
+    if session["clue_set"] is not None:
+        state.clue_set = session["clue_set"]
+    state.clue_round = session["clue_round"]
     state.verdict_open = False
     state.same_questions = True
     state.open_eval = True            # 평가 탭부터 보여 준다
@@ -630,7 +641,7 @@ if state.stage == "start":
                         key="resume_skip",
                     )
                     st.caption(
-                        f"체크하면 면접 없이 **같은 {previous['round']}회차**의 평가 · 재도전 · 마지막 질문 · 암기 · 리포트부터 이어서 해요. "
+                        f"체크하면 면접 없이 **같은 {previous['round']}회차**의 평가 · 재도전 · 암기 · 점검하기 · 리포트부터 이어서 해요. "
                         f"체크하지 않으면 **{coach.next_round(previous)}회차** 면접을 새로 시작해요."
                     )
             else:
@@ -705,6 +716,7 @@ if state.stage == "start":
                 state.pop("clue_set", None); state.pop("clue_round", None)  # 새 평가에서 실마리를 다시 찾는다
                 state.retries = {}
                 state.retry_history = {}
+                state.memo_edits, state.memo_reviews = {}, {}  # 고친 대본 · 검토 내역은 질문이 바뀌면 맞지 않는다
                 state.last_question = None
                 state.last_suggest = None
                 state.highlights = {}
@@ -744,7 +756,7 @@ if state.stage == "briefing":
         f"- 질문은 한 번에 하나씩 나와요. 답이 부족하면 면접관이 **꼬리 질문을 최대 {coach.MAX_FOLLOW_UPS}개** 해요.\n"
         f"- 답은 한 번에 **{coach.MAX_ANSWER_CHARS:,}자**까지 쓸 수 있어요.\n"
         "- 면접이 끝나면 위원 4명이 평가하고, 점수가 낮은 질문은 다시 도전할 수 있어요.\n"
-        "- 새로고침하면 진행 기록이 사라져요. 평가 뒤 :material/description: 리포트 탭에서 면접리포트.md 를 받아 두세요."
+        "- 새로고침하면 진행 기록이 사라져요. 평가 뒤 위쪽 :material/description: 리포트 저장하기 버튼에서 면접리포트.md 를 받아 두세요."
     )
     begin_col, back_col = st.columns([2, 1])
     if begin_col.button("면접을 시작하겠습니다.", type="primary", width="stretch"):
@@ -771,8 +783,33 @@ if state.get("notice"):
     st.info(state.pop("notice"))
 
 
+def memo_summary() -> dict:
+    """암기 탭 기록 요약 (체크리스트용): 말하기 타이머로 기록한 횟수 · 대본을 고친 질문 수 · 실전 시뮬레이션을 확인한 질문 수."""
+    speak = sum(len(v) for logs in state.get("speak_logs", {}).values()
+                for v in (logs.values() if isinstance(logs, dict) else [logs]))
+    edited = len({key.split(":")[0] for key in state.get("memo_edits", {})})
+    checked = len({key.split(":")[0] for key in state.get("memo_results", {})})
+    return {"speak": speak, "edited": edited, "checked": checked}
+
+
+def checklist_rows(report_done: bool | None = None) -> list[dict]:
+    """단계 체크리스트 (탭 6개 + 리포트). 진행 막대 · 리포트 창 체크리스트 · 마침 안내가 같이 쓴다."""
+    try:
+        precheck_items = coach.load_precheck()
+    except (OSError, KeyError, ValueError):
+        precheck_items = []
+    ev = state.get("evaluation")
+    clues = coach.clue_status(ev, state.get("retries", {}), state.get("retry_counts", {}),
+                              state.get("clue_set"), state.get("clue_round", 1)) if ev else None
+    return coach.report_checklist(
+        state.get("messages", []), ev, clues, bool(state.get("verdict_open")), memo_summary(),
+        state.get("last_suggest"), state.get("last_question"), precheck_items, current_precheck(precheck_items),
+        bool(state.get("report_downloaded")) if report_done is None else report_done,
+    )
+
+
 def build_current_report(ev: dict, updated_at: str | None = None) -> str:
-    """지금 회차의 면접리포트.md (리포트 탭 · 다음 회차 진행이 같이 쓴다)."""
+    """지금 회차의 면접리포트.md (리포트 창 · 다음 회차 진행이 같이 쓴다)."""
     try:
         precheck_items = coach.load_precheck()
     except (OSError, KeyError, ValueError):
@@ -783,7 +820,34 @@ def build_current_report(ev: dict, updated_at: str | None = None) -> str:
         precheck_items, current_precheck(precheck_items), updated_at, user_now().date(),
         retry_counts=state.retry_counts, understanding=state.understanding,
         retry_history=state.get("retry_history", {}),
+        clue_set=state.get("clue_set"), clue_round=state.get("clue_round", 1), memo=memo_summary(),
+        verdict_open=bool(state.get("verdict_open")),
+        practice=current_practice(),
     )
+
+
+def past_reports() -> list[dict]:
+    """지난 회차 리포트: 불러온 리포트 중 지금 직군 것 + 이어 하는 리포트 (같은 것은 한 번만)."""
+    reports = list(job_reports().values())
+    if state.get("previous") and all(state.previous is not r for r in reports):
+        reports.append(state.previous)
+    return reports
+
+
+def current_practice() -> list[dict]:
+    """리포트에 남길 연습 대본: 지난 회차 대본 + 이번 회차 암기 탭에서 고치거나 직접 쓴 대본 (질문 글 기준).
+    다음 회차의 암기 탭 '다른 질문' 에서 '내 연습 대본 (n회차)' 로 다시 나온다."""
+    texts = {q["question"]: q["question"] for q in state.get("questions", [])}
+    by_id = {coach.practice_id(t): t for t in texts}
+    by_id.update({q["id"]: q["question"] for q in other_questions()})
+    current = {}
+    for key, script in state.get("memo_edits", {}).items():
+        head = key.split(":")[0]
+        if head.isdigit() and 1 <= int(head) <= len(state.get("questions", [])):
+            current[state.questions[int(head) - 1]["question"]] = script
+        elif head in by_id:
+            current[by_id[head]] = script
+    return coach.merge_practice(coach.saved_practice(past_reports()), current, int(state.get("round", 1)))
 
 
 def go_next_round():
@@ -800,20 +864,50 @@ def go_next_round():
 
 next_round_no = coach.next_round({"round": state.round})
 st.title(f"{profile['company']} · {coach.field_of(profile)} · {profile['job']} 신입 면접 · {state.round}회차")
-if st.button(f":material/skip_next: {next_round_no}회차 면접 진행하기", key="next_round",
-             help="지금 회차를 리포트로 남기고, 같은 회사로 다음 회차 면접을 시작해요."):
+def ask_report():
+    state.open_report = True  # 창은 아래(함수를 다 정의한 뒤)에서 연다
+
+
+# 다음 회차 · 리포트 버튼을 한 줄에 (리포트는 탭이 아니라 넓은 창으로 본다)
+with st.container(horizontal=True, gap="small"):
+    next_clicked = st.button(f":material/skip_next: {next_round_no}회차 면접 진행하기", key="next_round",
+                             help="지금 회차를 리포트로 남기고, 같은 회사로 다음 회차 면접을 시작해요.")
+    st.button(":material/description: 리포트 저장하기", key="open_report_btn", on_click=ask_report,
+              help="면접리포트.md 를 미리 보고 내려받아요. 다음 회차 시작 화면에 올리면 이어서 할 수 있어요.")
+if next_clicked:
     if not state.get("evaluation"):
         st.info("위원 4명에게 평가받은 뒤에 다음 회차 면접을 진행할 수 있어요.")
     else:
-        state.next_round_pending = True
-if state.get("next_round_pending") and state.get("evaluation"):
-    st.warning(f"{next_round_no}회차로 넘어가면 지금 화면의 기록은 사라지고, 왼쪽 '불러온 리포트' 에 {state.round}회차로 남아요. "
-               "목록은 새로고침하면 사라지니 :material/description: 리포트를 받아 두세요.")
-    go_col, stay_col, _ = st.columns([1, 1, 3])
-    go_col.button(f"{next_round_no}회차 시작하기", type="primary", on_click=go_next_round, key="next_round_go")
-    if stay_col.button("머무르기", key="next_round_stay"):
-        state.next_round_pending = False
-        st.rerun()
+        state.open_next_round = True  # 안내 창은 아래(함수를 다 정의한 뒤)에서 연다
+
+
+def next_round_dialog():
+    """'n회차 면접 진행하기' 안내 창: 오른쪽 위 X 로 닫고(머무르기), 아래 [저장하기] [n회차 시작하기].
+    제목에 회차 숫자가 들어가서 열 때마다 대화 상자를 만든다."""
+    @st.dialog(f"{next_round_no}회차 면접 진행하기")
+    def body():
+        st.write(f"{next_round_no}회차로 넘어가면 지금 화면의 기록은 사라지고, 왼쪽 '불러온 리포트' 에 "
+                 f"{state.round}회차로 남아요. 목록은 새로고침하면 사라지니 먼저 리포트를 저장해 두세요.")
+        st.caption(":material/lock: 리포트에는 이름 · 회사 · 내 경험 원문 · 면접 대화 · 답변 · 체크리스트 메모가 들어가요. "
+                   "다른 사람과 공유할 때 주의해 주세요.")
+        # 리포트 창과 같은 규칙: 개인정보 안내를 확인해야 저장 버튼이 켜진다 (사용자 요청 — disabled 예외)
+        agreed = st.checkbox("위 안내를 확인했어요. 개인정보가 들어간 파일이라는 걸 알고 내려받을게요.", key="next_agree")
+        file_name = coach.report_file_name(profile["company"], profile["job"], state.round, user_now().date())
+        save_col, go_col = st.columns(2)
+        save_col.download_button(
+            ":material/download: 저장하기", data=build_current_report(state.evaluation, user_now().strftime("%Y-%m-%d %H:%M")),
+            file_name=file_name, mime="text/markdown", disabled=not agreed, width="stretch",
+            on_click=mark_report_downloaded, key="next_round_save",
+        )
+        if go_col.button(f"{next_round_no}회차 시작하기", type="primary", width="stretch", key="next_round_go"):
+            go_next_round()
+            st.rerun()  # 창 안 버튼은 창만 다시 그리므로 화면 전체를 다시 그린다
+        if not agreed:
+            st.caption(":material/info: 안내를 확인하고 체크하면 저장하기 버튼이 켜져요. 저장하지 않고 시작해도 돼요.")
+        elif state.get("report_downloaded"):
+            st.caption(":material/check: 리포트를 저장했어요.")
+
+    body()
 
 def show_messages():
     for message in state.messages:
@@ -1149,8 +1243,29 @@ def show_evaluation(ev: dict):
             st.caption("지난 면접과 같은 질문이 없어서 질문별 비교는 없어요.")
 
     st.subheader("답변별 점수")
+    # 질문마다 나온 회차 태그 (지난 회차는 회색, 이번 회차는 초록) · 지난 회차에만 나온 질문은 '전체 회차 보기' 에서
+    history = coach.question_history(past_reports())
+    current_round = int(state.round)
+    current_texts = {q["question"] for q in state.questions}
+    past_only = {t: rows for t, rows in history.items() if t not in current_texts}
+    show_all = False
+    if past_only:
+        options = [f"{current_round}회차만 보기", "전체 회차 보기"]
+        if state.get("eval_rounds") not in options:
+            state.eval_rounds = options[0]
+        show_all = st.segmented_control(
+            "보기", options, key="eval_rounds", required=True, label_visibility="collapsed",
+            help="전체 회차 보기: 이번 회차에 나오지 않은 지난 회차 질문과 그때 답도 함께 보여요 (점수는 이번 회차 종합에 들어가지 않아요).",
+        ) == options[1]
+
+    def tags(text: str, with_current: bool) -> str:
+        rounds = {row["round"] for row in history.get(text, [])} - {current_round}
+        rounds = sorted(rounds | ({current_round} if with_current else set()))
+        return " ".join(f":green-badge[{r}회차]" if r == current_round else f":gray-badge[{r}회차]" for r in rounds)
+
     for a in ev["answers"]:
-        with st.expander(f"질문 {a['no']} · {a['score']}/{coach.ANSWER_MAX}점", expanded=a["needs_rewrite"]):
+        label = f"질문 {a['no']} · {a['score']}/{coach.ANSWER_MAX}점 {tags(a['question'], True)}"
+        with st.expander(label, expanded=a["needs_rewrite"]):
             st.caption(a["question"])
             st.write(" · ".join(f"{name} {a['scores'][key]}" for key, name in coach.CRITERIA.items()))
             st.markdown("**내 답**")
@@ -1163,6 +1278,20 @@ def show_evaluation(ev: dict):
                     state.go_retry_no = a["no"]
                     state.go_tab = RETRY_TAB
                     st.rerun()
+
+    if not show_all:
+        return
+    # 지난 회차에만 나온 질문: 그 회차의 최신 답 · 점수 (읽기만 · 이번 회차 종합 점수에는 들어가지 않는다)
+    st.markdown("**지난 회차에만 나온 질문**")
+    st.caption("지난 회차 기록이에요. 점수는 그 회차 최신 점수이고, 이번 회차 종합 점수에는 들어가지 않아요. "
+               ":material/psychology: 암기 탭의 '다른 질문' 에서 연습할 수 있어요.")
+    for text, rows in sorted(past_only.items(), key=lambda kv: -kv[1][-1]["round"]):
+        last = rows[-1]
+        score = f"{last['score']}/{coach.ANSWER_MAX}점" if isinstance(last["score"], int) else "점수 없음"
+        with st.expander(f"지난 {last['round']}회차 질문 · {score} {tags(text, False)}"):
+            st.caption(text)
+            st.markdown(f"**{last['round']}회차 내 답**")
+            st.markdown("  \n".join(coach.split_sentences(last["answer"])) or "(답 없음)")
 
 
 def highlight_toggle(key: str) -> bool:
@@ -1238,6 +1367,49 @@ def show_panel_coaching(before: dict, after: dict):
             st.markdown(f"{COACH_TREND_ICONS[row['trend']]} {row['message']}")
 
 
+def show_retry_result(no: int, ev: dict, index: int, place: str, celebrate: bool = False):
+    """재도전 결과 하나 (전 → 후). 재도전 탭 · 암기 탭의 재도전 검토가 같은 구조로 같이 쓴다.
+    index: retry_history 안의 몇 번째 재도전인지. place: 두 탭이 함께 그려져도 칸 key 가 겹치지 않게.
+    celebrate: 점수가 오르면 '역전 성공!' 을 여기서 띄운다 (재도전 탭은 실마리 카드에만 띄우므로 False)."""
+    last = ev["answers"][no - 1]
+    question = state.questions[no - 1]
+    history = state.get("retry_history", {}).get(no, [])
+    result = history[index]
+    reflected = state.retries.get(no)  # 종합 점수에는 최고 점수 (coach.reflected_retry)
+    diff = coach.compare(last["scores"], result["scores"])
+    if diff["diff"] > 0 and celebrate:
+        st.success(f":material/celebration: 역전 성공! {diff['before']} → {diff['after']}점으로 {diff['diff']}점 올랐어요.")
+    elif diff["diff"] == 0:
+        st.info(f"점수가 {diff['after']}점 그대로예요. 아래 약한 점과 전략 가이드를 보고 한 부분만 바꿔 보세요.")
+    elif diff["diff"] < 0:  # 진짜로 내려갔을 때만
+        st.warning(
+            f"{diff['before']} → {diff['after']}점으로 {-diff['diff']}점 내려갔어요. "
+            "아래 기준별 변화와 약한 점을 보고 다시 도전해 보세요."
+        )
+    st.metric("후 점수", f"{diff['after']}/{coach.ANSWER_MAX}", delta=diff["diff"])
+    if reflected is result:
+        st.caption(":material/check: 이 점수가 종합 점수에 반영돼요 (최고 점수 반영).")
+    elif reflected:
+        n = history.index(reflected) + 1
+        st.caption(f":material/info: 종합 점수에는 {n}번째 재도전의 최고 점수 {reflected['score']}점이 반영돼 있어요.")
+    else:
+        st.caption(f":material/info: 처음 점수보다 높지 않아서, 종합 점수에는 처음 점수 {last['score']}점이 그대로 반영돼요.")
+    # 기준별 전/후 막대 그래프 (숫자는 모두 coach.compare() 가 계산한 값)
+    chart = pd.DataFrame(
+        {"전": [r["전"] for r in diff["rows"]], "후": [r["후"] for r in diff["rows"]]},
+        index=[r["기준"] for r in diff["rows"]],
+    )
+    st.bar_chart(chart, stack=False, y_label="점수 (0~5)", color=["#C2C4C8", "#4263D6"], height=240)
+    st.table(diff["rows"], hide_index=True)
+    st.markdown(f"**이번 답의 약한 점:** {result['weak']}")
+    ai_note("점수 차이는 앱이 계산했고, 약한 점은 AI가 쓴 의견")
+    retry_key = f"retry:{no}:{result['answer']}"  # 형광펜 · 전략은 두 탭이 같은 답이면 같이 쓴다
+    with st.expander(":material/edit_note: 다시 쓴 답 보기"):
+        show_answer(result["answer"], question, retry_key, highlight_toggle(f"hl_{place}_after_{no}"))
+    show_strategy(f"{place}_after", retry_key, no, result["scores"], result["weak"], result["answer"], ev)
+    show_panel_coaching(last["scores"], result["scores"])
+
+
 def show_retry(ev: dict):
     if state.pop("scroll_top", False):
         scroll_to_top()
@@ -1262,9 +1434,7 @@ def show_retry(ev: dict):
 
     history = state.get("retry_history", {}).get(no, [])
     result = history[-1] if history else None   # 화면에는 방금 한 재도전
-    reflected = state.retries.get(no)           # 종합 점수에는 최고 점수 (coach.reflected_retry)
-    diff = coach.compare(last["scores"], result["scores"]) if result else None
-    comeback = bool(diff) and diff["diff"] > 0  # 역전 성공이면 결과를 맨 위, 역전 전 기록은 맨 아래로
+    comeback = bool(result) and result["score"] > last["score"]  # 역전 성공이면 결과를 맨 위, 역전 전 기록은 맨 아래로
 
     def show_past():
         st.metric("지난 점수", f"{last['score']}/{coach.ANSWER_MAX}")
@@ -1306,35 +1476,7 @@ def show_retry(ev: dict):
 
     def show_result():
         # 점수가 오르면 '역전 성공!' 은 맨 위 역전의 실마리 카드에만 띄운다 (여기서는 후 점수 +n 으로만 보여 줌)
-        if diff["diff"] == 0:
-            st.info(f"점수가 {diff['after']}점 그대로예요. 아래 약한 점과 전략 가이드를 보고 한 부분만 바꿔 보세요.")
-        elif diff["diff"] < 0:  # 진짜로 내려갔을 때만
-            st.warning(
-                f"{diff['before']} → {diff['after']}점으로 {-diff['diff']}점 내려갔어요. "
-                "아래 기준별 변화와 약한 점을 보고 다시 도전해 보세요."
-            )
-        st.metric("후 점수", f"{diff['after']}/{coach.ANSWER_MAX}", delta=diff["diff"])
-        if reflected is result:
-            st.caption(":material/check: 이 점수가 종합 점수에 반영돼요 (최고 점수 반영).")
-        elif reflected:
-            n = history.index(reflected) + 1
-            st.caption(f":material/info: 종합 점수에는 {n}번째 재도전의 최고 점수 {reflected['score']}점이 반영돼 있어요.")
-        else:
-            st.caption(f":material/info: 처음 점수보다 높지 않아서, 종합 점수에는 처음 점수 {last['score']}점이 그대로 반영돼요.")
-        # 기준별 전/후 막대 그래프 (숫자는 모두 coach.compare() 가 계산한 값)
-        chart = pd.DataFrame(
-            {"전": [r["전"] for r in diff["rows"]], "후": [r["후"] for r in diff["rows"]]},
-            index=[r["기준"] for r in diff["rows"]],
-        )
-        st.bar_chart(chart, stack=False, y_label="점수 (0~5)", color=["#C2C4C8", "#4263D6"], height=240)
-        st.table(diff["rows"], hide_index=True)
-        st.markdown(f"**이번 답의 약한 점:** {result['weak']}")
-        ai_note("점수 차이는 앱이 계산했고, 약한 점은 AI가 쓴 의견")
-        retry_key = f"retry:{no}:{result['answer']}"
-        with st.expander(":material/edit_note: 다시 쓴 답 보기"):
-            show_answer(result["answer"], question, retry_key, highlight_toggle(f"hl_retry_after_{no}"))
-        show_strategy("retry_after", retry_key, no, result["scores"], result["weak"], result["answer"], ev)
-        show_panel_coaching(last["scores"], result["scores"])
+        show_retry_result(no, ev, len(history) - 1, "retry")
 
     if comeback:
         show_result()
@@ -1468,7 +1610,31 @@ def user_now() -> datetime:
     return datetime.now(tz)
 
 
+def show_report_checklist():
+    """단계 체크리스트: 탭 7개 순서 그대로, 하위 항목은 들여 써서 (표시만 · 고르는 건 coach.report_checklist).
+    위쪽 진행 막대와 같은 목록이라 'n단계 중 n단계 완료' 숫자가 늘 같다."""
+    rows = checklist_rows()
+
+    def icon(done: bool) -> str:
+        return ":green[:material/check_box:]" if done else ":gray[:material/check_box_outline_blank:]"
+
+    with st.container(border=True):
+        st.markdown(f"**:material/checklist: 단계 체크리스트** · {coach.checklist_summary(rows)}")
+        st.caption("앱이 지금 기록으로 자동 표시해요. 탭 번호와 같은 순서이고, 마지막이 이 리포트예요. 하위 항목은 그 단계 안에서 할 수 있는 일이에요.")
+        for r in rows:
+            detail = f" :gray[({r['detail']})]" if r["detail"] else ""
+            tag = " :gray[· 선택]" if r["optional"] else ""
+            number = f"{r['step']}. " if r["step"] else ""  # 리포트는 탭이 아니라 번호 없음
+            lines = [f"{icon(r['done'])} **{number}{r['item']}**{detail}{tag}"]
+            lines += [
+                f"{'&nbsp;' * 7}{icon(s['done'])} {s['item']}" + (f" :gray[({s['detail']})]" if s["detail"] else "")
+                for s in r["sub"]
+            ]
+            st.markdown("  \n".join(lines))
+
+
 def show_report(ev: dict):
+    """리포트 창: 개인정보 안내 · 확인 체크 · 다운로드 · 마지막 업데이트를 맨 위에, 그 아래 단계 체크리스트 · 미리보기."""
     today = user_now().date()  # 파일 이름 · 리포트 날짜 모두 사용자 시간대 기준
 
     # 리포트 내용이 바뀐 때만 '마지막 업데이트' 시각을 새로 찍는다 (가장 최신 시각 하나만 남긴다).
@@ -1499,6 +1665,7 @@ def show_report(ev: dict):
     if not agreed:
         # 비활성 버튼이 왜 꺼져 있는지 알려 준다 (ui-ux-pro-max: Interaction · Disabled States)
         st.caption(":material/info: 위 안내를 확인하고 체크하면 다운로드 버튼이 켜져요.")
+    show_report_checklist()
     st.caption(
         "오른쪽 위 복사 아이콘으로 내용을 복사할 수 있어요. 점수는 모두 앱이 계산한 값이고, "
         "'AI 의견' 표시가 붙은 글은 AI가 쓴 거예요. 마지막 질문을 만들어 두면 리포트에 같이 들어가요. "
@@ -1509,28 +1676,60 @@ def show_report(ev: dict):
 
 # ── 최종 판결: 문자 → 이메일 연출. 판정은 coach.verdict(), 글은 모두 고정 문구 (AI 호출 없음) ──
 VERDICT_CSS = """<style>
-.vd { display: grid; gap: 14px; max-width: 560px; margin: 4px auto; overflow-wrap: anywhere; }
+.vd { display: grid; gap: 14px; width: 100%; margin: 4px 0; overflow-wrap: anywhere; }
 .vd * { box-sizing: border-box; }
-.vd-banner { background: #171719; color: #F7F7F8; border-radius: 12px; padding: 16px 18px;
-  font-weight: 600; text-align: center; animation: vd-in .5s ease-out both; }
-.vd-phone { background: #171719; border-radius: 28px; padding: 18px 14px 22px; max-width: 320px;
-  width: 100%; margin: 0 auto; border: 4px solid #2E2F33; animation: vd-in .5s ease-out .25s both; }
-.vd-notch { width: 80px; height: 6px; border-radius: 3px; background: #2E2F33; margin: 0 auto 14px; }
-.vd-sms { background: #2E2F33; color: #F7F7F8; border-radius: 14px; padding: 12px 14px; font-size: .92em; line-height: 1.5; }
-.vd-sms b { display: block; font-size: .8em; color: #AEB0B6; margin-bottom: 4px; }
-.vd-mail { background: #FFFFFF; color: #171719; border: 1px solid #E1E2E4; border-radius: 12px;
-  padding: 18px 20px; line-height: 1.6; animation: vd-in .5s ease-out .5s both; }
-.vd-mail .vd-subject { font-weight: 700; font-size: 1.02em; margin-bottom: 8px; }
-.vd-mail .vd-from { color: #70737C; font-size: .85em; margin-bottom: 12px; }
-.vd-mail .vd-result { font-size: 1.15em; font-weight: 700; margin: 10px 0; }
-.vd-mail .vd-pass { color: #006E25; }
-.vd-mail .vd-candidate { color: #10256B; }
-.vd-mail .vd-more { color: #E52222; }
-.vd-mail .vd-score { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
-.vd-mail .vd-score span { background: #F4F4F5; border-radius: 8px; padding: 6px 10px; }
-.vd-mail .vd-note { color: #70737C; font-size: .82em; border-top: 1px solid #EAEBEC; padding-top: 10px; margin-top: 12px; }
+.vd-phone { background: #171719; border-radius: 28px; padding: 18px 18px 22px;
+  width: 100%; margin: 0; border: 4px solid #2E2F33; animation: vd-in .3s ease-out both; }
+.vd-notch { width: 80px; height: 6px; border-radius: 3px; background: #2E2F33; margin: 0 auto 10px; }
+.vd-contact { text-align: center; color: #F7F7F8; font-size: .875rem; font-weight: 600;
+  border-bottom: 1px solid #2E2F33; padding-bottom: 8px; }
+.vd-contact span { display: block; color: #AEB0B6; font-size: .75rem; font-weight: 400; }
+/* 문자 대화: 아래에서부터 쌓인다. 새 문자가 아래에 자라면 앞 문자가 위로 밀려 올라간다 */
+.vd-thread { display: flex; flex-direction: column; justify-content: flex-end; min-height: 190px; padding-top: 10px; }
+.vd-sms { background: #2E2F33; color: #F7F7F8; border-radius: 14px 14px 14px 4px; padding: 10px 13px;
+  font-size: .92em; line-height: 1.5; max-width: 75%; width: fit-content; overflow: hidden; }
+.vd-time { color: #878A93; font-size: .75rem; margin: 3px 0 0 4px; }
+.vd-m1 { animation: vd-pop .2s ease-out .5s both; }
+.vd-m2 { overflow: hidden; animation: vd-grow .3s ease-out 1.9s both; }
+/* 결과 메일: 메일 앱 한 통처럼 (머리글 · 제목 · 결과 카드 · 점수 3칸 · 서명 · 안내 주석) */
+.vd-mail { background: #FFFFFF; color: #171719; border: 1px solid #E1E2E4; border-radius: 16px; overflow: hidden;
+  line-height: 1.6; word-break: keep-all; box-shadow: 0 1px 2px rgba(23, 23, 25, .04); animation: vd-in .3s ease-out 3s both; }
+.vd-mail-bar { display: flex; align-items: center; gap: 8px; padding: 10px 24px; background: #F7F7F8;
+  border-bottom: 1px solid #EAEBEC; color: #70737C; font-size: .8125rem; }
+.vd-dot { width: 8px; height: 8px; border-radius: 4px; background: #10256B; }
+.vd-mail-head { display: flex; align-items: center; gap: 12px; padding: 20px 24px 0; }
+.vd-avatar { flex: 0 0 40px; height: 40px; border-radius: 20px; background: #10256B; color: #FFFFFF;
+  display: grid; place-items: center; font-weight: 600; }
+.vd-sender { flex: 1; min-width: 0; line-height: 1.4; }
+.vd-sender b { display: block; font-weight: 600; font-size: .9375rem; }
+.vd-sender span, .vd-when { color: #70737C; font-size: .8125rem; }
+.vd-subject { padding: 16px 24px 0; font-size: 1.25rem; font-weight: 600; line-height: 1.35; word-break: keep-all; }
+.vd-body { padding: 16px 24px 24px; }
+.vd-body > p { margin: 0 0 16px; }
+.vd-status { border: 1px solid; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+.vd-status.pass { background: #F2FFF6; border-color: #B8EFCA; }
+.vd-status.candidate { background: #F3F5FB; border-color: #CDD5EE; }
+.vd-status.more { background: #FFF5F5; border-color: #F8CFCF; }
+.vd-pill { display: inline-block; font-size: .75rem; font-weight: 600; color: #FFFFFF; border-radius: 999px;
+  padding: 2px 10px; margin-bottom: 8px; }
+.pass .vd-pill { background: #006E25; } .candidate .vd-pill { background: #10256B; } .more .vd-pill { background: #B00C0C; }
+.vd-result { font-size: 1.125rem; font-weight: 600; line-height: 1.4; margin-bottom: 6px; word-break: keep-all; }
+.pass .vd-result { color: #006E25; } .candidate .vd-result { color: #10256B; } .more .vd-result { color: #B00C0C; }
+.vd-status p { margin: 0; color: #46474C; }
+.vd-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 20px; }
+.vd-stat { border: 1px solid #EAEBEC; border-radius: 12px; padding: 12px 14px; }
+.vd-stat.key { background: #F7F7F8; }
+.vd-stat span { display: block; color: #70737C; font-size: .8125rem; }
+.vd-stat b { font-size: 1.375rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.vd-stat small { color: #70737C; font-size: .8125rem; }
+.vd-sign { color: #46474C; }
+.vd-foot { background: #F7F7F8; border-top: 1px solid #EAEBEC; padding: 14px 24px; color: #70737C; font-size: .75rem; }
+.vd-foot p { margin: 0; }
 @keyframes vd-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .vd-banner, .vd-phone, .vd-mail { animation: none; } }
+@keyframes vd-pop { from { opacity: 0; transform: translateY(10px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes vd-grow { from { opacity: 0; max-height: 0; margin-top: 0; transform: translateY(12px); }
+  to { opacity: 1; max-height: 260px; margin-top: 10px; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .vd-phone, .vd-m1, .vd-m2, .vd-mail { animation: none; } }
 </style>"""
 
 
@@ -1555,42 +1754,57 @@ def show_verdict(ev: dict):
     # 위원 평균이 모자라면 재도전만으로는 못 채운다 (재도전은 종합 점수만 올림) → 다음 회차 면접을 안내
     next_round = f"재도전으로 대답을 수정하는 연습을 거친 후, {int(state.round) + 1}회차 면접을 통해 위원 평가 점수를 올려보세요."
     if result["level"] == "pass":
-        headline = ('<div class="vd-result vd-pass">모의면접 합격입니다. 당신의 가능성을 증명했습니다.</div>'
-                    "<p>암기와 말하기 연습을 지속하세요.</p>")
+        title, body = "모의면접 합격입니다. 당신의 가능성을 증명했습니다.", "암기와 말하기 연습을 지속하세요."
     elif result["level"] == "candidate":
-        headline = ('<div class="vd-result vd-candidate">합격 후보로 선정되었습니다.</div>'
-                    f"<p>합격선(위원 평균 {coach.PASS_PANEL:.1f} · 종합 {coach.PASS_TOTAL})까지 <b>{need}</b> 남았어요. "
-                    + (next_round if result["panel_short"] else
-                       "경쟁률이 높을 경우 재도전으로 대답을 수정하거나 암기와 말하기 연습으로 다듬어보세요.")
-                    + "</p>")
+        title = "합격 후보로 선정되었습니다."
+        body = (f"합격선(위원 평균 {coach.PASS_PANEL:.1f} · 종합 {coach.PASS_TOTAL})까지 <b>{need}</b> 남았어요. "
+                + (next_round if result["panel_short"] else
+                   "경쟁률이 높을 경우 재도전으로 대답을 수정하거나 암기와 말하기 연습으로 다듬어보세요."))
     else:
-        headline = (f'<div class="vd-result vd-more">'
-                    f'{next_round if result["panel_short"] else "재도전으로 대답을 수정해보세요."}</div>'
-                    f"<p>합격 후보까지 <b>{need}</b> 부족해요. 아직 역전의 기회가 남아 있어요.</p>")
+        title = next_round if result["panel_short"] else "재도전으로 대답을 수정해보세요."
+        body = f"합격 후보까지 <b>{need}</b> 부족해요. 아직 역전의 기회가 남아 있어요."
+    initial = html.escape(profile["company"].strip()[:1] or "M")  # 보낸 사람 동그라미: 회사 이름 첫 글자
+    mail = (
+        '<div class="vd-mail">'
+        + '<div class="vd-mail-bar"><span class="vd-dot"></span>받은편지함 · 새 메일 1통</div>'
+        + f'<div class="vd-mail-head"><div class="vd-avatar">{initial}</div>'
+        + f'<div class="vd-sender"><b>{company} 모의면접 위원회</b><span>받는 사람: {name}</span></div>'
+        + '<div class="vd-when">지금</div></div>'
+        + f'<div class="vd-subject">[{company}] {job} 신입 모의면접 결과 안내 ({state.round}회차)</div>'
+        + '<div class="vd-body">'
+        + f"<p>{name}님, 모의면접에 참여해 주셔서 감사합니다.</p>"
+        + f'<div class="vd-status {result["level"]}"><span class="vd-pill">{result["label"]}</span>'
+        + f'<div class="vd-result">{title}</div><p>{body}</p></div>'
+        + '<div class="vd-stats">'
+        + f'<div class="vd-stat key"><span>최신 종합</span><b>{totals["latest"]}</b><small>/{coach.TOTAL_MAX}</small></div>'
+        + f'<div class="vd-stat"><span>최초 종합</span><b>{totals["first"]}</b><small>/{coach.TOTAL_MAX}</small></div>'
+        + f'<div class="vd-stat"><span>위원 평균</span><b>{ev["panel_average"]:.1f}</b><small>/{coach.PANEL_MAX}</small></div>'
+        + "</div>"
+        + f'<div class="vd-sign">{company} 모의면접 위원회 드림</div>'
+        + "</div>"
+        # 안내 문구는 메일 맨 아래 주석으로 모은다
+        + '<div class="vd-foot">'
+        + f"<p>※ 보낸 사람: {company} 모의면접 위원회 · 이 앱에서만 보이는 시뮬레이션이에요.</p>"
+        + "<p>※ 이 결과는 AI 모의면접 학습 지표이며 실제 채용 결과와 무관하고, 실제 합격 가능성을 보장하지 않아요. "
+          "문자와 메일은 실제로 보내지 않아요.</p>"
+        + "</div></div>"
+    )
     st.html(
         VERDICT_CSS
         + '<div class="vd">'
-        + '<div class="vd-banner">최종 면접 결과가 도착했습니다.</div>'
         + '<div class="vd-phone"><div class="vd-notch"></div>'
-        + f'<div class="vd-sms"><b>문자 · {company} (모의)</b>{name}님, {company} {job} 신입 모의면접 결과를 '
-          "메일로 보내 드렸습니다. 메일함을 확인해 주세요.</div></div>"
-        + '<div class="vd-mail">'
-        + f'<div class="vd-subject">[{company}] {job} 신입 모의면접 결과 안내 ({state.round}회차)</div>'
-        + f'<div class="vd-from">보낸 사람: {company} 모의면접 위원회 · 이 앱에서만 보이는 시뮬레이션이에요</div>'
-        + f"<p>{name}님, 모의면접에 참여해 주셔서 감사합니다.</p>"
-        + headline
-        + '<div class="vd-score">'
-        + f"<span>최신 종합 <b>{totals['latest']}</b>/{coach.TOTAL_MAX}</span>"
-        + f"<span>최초 종합 {totals['first']}/{coach.TOTAL_MAX}</span>"
-        + f"<span>위원 평균 <b>{ev['panel_average']:.1f}</b>/{coach.PANEL_MAX}</span>"
-        + "</div>"
-        + '<div class="vd-note">이 결과는 AI 모의면접 학습 지표이며 실제 채용 결과와 무관하고, '
-          "실제 합격 가능성을 보장하지 않아요. 문자와 메일은 실제로 보내지 않아요.</div>"
+        + f'<div class="vd-contact">{company} (모의)<span>문자 메시지</span></div>'
+        + '<div class="vd-thread">'
+        + '<div class="vd-m1"><div class="vd-sms">최종 면접 결과가 도착했습니다.</div><div class="vd-time">지금</div></div>'
+        + f'<div class="vd-m2"><div class="vd-sms">{name}님, {company} {job} 신입 모의면접 결과를 '
+          "메일로 보내 드렸습니다. 메일함을 확인해 주세요.</div><div class=\"vd-time\">지금</div></div>"
         + "</div></div>"
+        + mail
+        + "</div>"
     )
     report_col, retry_col = st.columns(2)
     if report_col.button(":material/description: 성장 리포트 보기", type="primary", width="stretch"):
-        state.go_tab = REPORT_TAB
+        state.open_report = True  # 리포트 창 열기
         st.rerun()
     if not result["passed"] and retry_col.button(":material/replay: 재도전으로 점수 올리기", width="stretch"):
         state.go_tab = RETRY_TAB
@@ -1607,7 +1821,7 @@ MEMO_CSS = f"""<style>
 .mm .shown {{ color: {HIGHLIGHT_TEXT}; background: #DCE1F0; border-radius: 3px; padding: 0 2px; }}
 .mm .kw {{ color: {HIGHLIGHT_TEXT}; background: #E8EBF5; border-radius: 3px; padding: 0 3px; font-weight: 600; }}
 .mm .rest {{ opacity: .62; }}  /* 테마 글자색을 흐리게: 라이트 · 다크 모두 대비 4.5 이상 */
-.mm .badge {{ display: inline-block; font-size: .75em; font-weight: 700; color: #B00C0C; background: #FFFFFF;
+.mm .badge {{ display: inline-block; font-size: .75em; font-weight: 600; color: #B00C0C; background: #FFFFFF;
   border: 1px solid #FF4242; border-radius: 4px; padding: 0 4px; margin-right: 4px; line-height: 1.4; }}
 .mm .sline {{ padding: 2px 6px; margin-bottom: 4px; }}
 .mm .sgap {{ color: {HIGHLIGHT_TEXT}; background: #FEECEC; border-left: 4px solid #FF4242; border-radius: 4px;
@@ -1723,8 +1937,8 @@ def show_speaking(key: str, text: str, question: str):
     if state.get("speak_step") not in coach.SPEAK_STEP_NAMES:
         state.speak_step = 1
     step = st.segmented_control(
-        "말하기 단계", list(coach.SPEAK_STEP_NAMES), key="speak_step", required=True,
-        format_func=lambda n: f"{SPEAK_STEP_ICONS[n]} {coach.SPEAK_STEP_NAMES[n]}", label_visibility="collapsed", width="stretch",
+        "단계", list(coach.SPEAK_STEP_NAMES), key="speak_step", required=True,
+        format_func=lambda n: f"{SPEAK_STEP_ICONS[n]} {coach.SPEAK_STEP_NAMES[n]}", width="stretch",
     )
 
     hint = None
@@ -1785,7 +1999,7 @@ def show_memo_strategy():
 
 
 def show_memo_skeleton(no: int, source: str, text: str):
-    st.caption(f":material/record_voice_over: 소리 내어 말하면 약 **{coach.speak_seconds(text)}초** 걸려요. 핵심어만 보고 소리 내어 답해 보세요.")
+    st.caption(":material/record_voice_over: 핵심어만 보고 소리 내어 답해 보세요. 걸리는 시간은 위 '내 대본' 옆에 있어요.")
     # 스위치: 끄면 뼈대(핵심어)만, 켜면 전체 문장에서 빠진 내용을 회색으로 함께
     full = st.toggle(
         "전체 문장 함께 보기", key=f"memo_full_{no}_{source}",
@@ -1889,20 +2103,74 @@ def show_memo_simulation(result_key: str, question: dict, text: str):
 TEXT_MODE, SPEAK_MODE = ":material/edit_note: 텍스트 모드", ":material/record_voice_over: 말하기 모드"
 
 
-def show_script_editor(no: int, result_key: str, original: str, text: str, ev: dict | None):
-    """:material/edit: 대본 고치기: 말해 보니 어색한 곳을 바로 고친다. 저장하면 모든 연습 단계가 고친 대본을 쓴다.
-    '수정하고 재도전 검토 받기' 는 재도전 탭과 같은 RETRY 채점 · 같은 횟수 상한을 쓴다 (AI 1번)."""
-    draft_key = f"memo_draft_{result_key}"
-    if state.pop("memo_draft_reset", None) == result_key or draft_key not in state:
-        state[draft_key] = text  # 칸을 그리기 전에만 값을 바꿀 수 있다
-    edited = result_key in state.memo_edits
-    label = ":material/edit: 대본 고치기" + (" · 고친 대본으로 연습 중" if edited else "")
-    if not st.toggle(label, key=f"memo_edit_on_{result_key}",
-                     help="말해 보니 어색한 곳이 있으면 켜서 바로 고쳐요."):
-        show_review_result(result_key)
-        return
+def script_hidden() -> bool:
+    """외우는 중이라 대본을 가려야 하는 단계: 텍스트 ③ 실전 시뮬레이션 · 말하기 모드 (말하기 1단계는 시작하면 대본이 나온다)."""
+    if state.get("memo_top") == SPEAK_MODE:
+        return True
+    return state.get("memo_view") == coach.MEMO_MODES[-1]
 
-    draft = st.text_area("대본", key=draft_key, height=180, max_chars=coach.MAX_ANSWER_CHARS)
+
+def show_script_editor(no, result_key: str, original: str, text: str, ev: dict | None, practice: dict | None = None):
+    """:material/menu_book: 대본: 먼저 읽고, 아래 '넓게 열어 고치기' 로 고친다. 저장하면 모든 연습 단계가 고친 대본을 쓴다.
+    화면 폭이 좁아서 넓은 창(대화 상자)에서 원래 대본 | 고친 대본을 나란히 보며 고친다.
+    외우는 단계(script_hidden)에서는 대본을 접어 둔다."""
+    edited = result_key in state.memo_edits
+    st.markdown(":material/menu_book: **내 대본**" + (" · :green[고친 대본]" if edited else "")
+                + f"  :gray[· 소리 내어 읽으면 약 {coach.speak_seconds(text)}초]")
+    lines = "  \n".join(coach.split_sentences(text)) or ":gray[아직 대본이 없어요. 아래 버튼으로 써 보세요.]"
+    if script_hidden():
+        with st.expander("대본 펼쳐 보기 · 지금은 외우는 단계라 접어 뒀어요"):
+            st.markdown(lines)
+    else:
+        with st.container(border=True):
+            st.markdown(lines)
+    label = ":material/open_in_full: 넓게 열어 고치기" if text else ":material/edit: 넓게 열어 대본 쓰기"
+    if st.button(label, key=f"memo_edit_open_{result_key}",
+                 help="원래 대본과 고친 대본을 나란히 보며 고쳐요. 말해 보니 어색한 곳이 있으면 바로 고쳐 보세요."):
+        script_dialog(no, result_key, original, text, ev, practice)
+    if not practice:  # 다른 질문은 연습만: 재도전 검토 내역이 없다
+        show_review_result(no, result_key, ev)
+
+
+def graded_answers(no: int) -> set[str]:
+    """이 질문에서 이미 채점받은 답 (면접 때 답 · 재도전한 답). 띄어쓰기 · 줄바꿈 차이는 같은 답으로 본다."""
+    def norm(s: str) -> str:
+        return " ".join(s.split())
+    answers = [coach.answer_text(state.messages, no - 1)] + [a["answer"] for a in state.get("retry_history", {}).get(no, [])]
+    return {norm(a) for a in answers if a.strip()}
+
+
+@st.dialog("대본 고치기", width="large")
+def script_dialog(no, result_key: str, original: str, text: str, ev: dict | None, practice: dict | None = None):
+    """원래 대본 | 고친 대본. '수정하고 재도전 검토 받기' 는 재도전 탭과 같은 RETRY 채점 · 같은 횟수 상한 (AI 1번).
+    이미 채점받은 대본과 같으면 다시 채점하지 않는다 (AI 점수가 흔들려 점수만 바뀌고 기회가 줄기 때문).
+    practice ({question, label}): 이번 회차가 아닌 '다른 질문' — 저장 · 되돌리기만 있고 채점하지 않는다."""
+    draft_key = f"memo_draft_{result_key}"
+    # 저장하지 않고 창을 닫아도 쓰던 글은 남긴다 (창이 닫히면 칸의 값은 지워지므로 따로 보관)
+    kept = state.setdefault("memo_draft_kept", {})
+    by_line = "\n".join(coach.split_sentences(text))  # 왼쪽 원래 대본처럼 한 문장씩 줄을 바꿔 비교하기 쉽게
+    if state.pop("memo_draft_reset", None) == result_key:
+        kept.pop(result_key, None)
+        state[draft_key] = by_line  # 칸을 그리기 전에만 값을 바꿀 수 있다
+    elif draft_key not in state:
+        state[draft_key] = kept.get(result_key, by_line)
+
+    def keep_draft():
+        kept[result_key] = state[draft_key]
+
+    if practice:
+        st.markdown(f"**다른 질문 · 연습만** {practice['question']}")
+    else:
+        st.markdown(f"**질문 {no}.** {state.questions[no - 1]['question']}")
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f"**원래 대본** · {practice['label'] if practice else '내 최신 답'}")
+        with st.container(border=True, height=360):
+            st.markdown("  \n".join(coach.split_sentences(original)) or "(답 없음)")
+    with right:
+        draft = st.text_area("**고친 대본**", key=draft_key, height=360, max_chars=coach.MAX_ANSWER_CHARS, on_change=keep_draft)
+        if result_key in kept and " ".join(kept[result_key].split()) != " ".join(text.split()):
+            st.caption(":material/draft: 저장하지 않은 고친 글이에요. 창을 닫아도 남아 있어요.")
     save_col, review_col, undo_col = st.columns([1, 1.4, 1])
     if save_col.button(":material/save: 고친 대본 저장", key=f"memo_save_{result_key}", width="stretch"):
         if not draft.strip():
@@ -1910,8 +2178,11 @@ def show_script_editor(no: int, result_key: str, original: str, text: str, ev: d
         else:
             state.memo_edits[result_key] = draft.strip()
             state.memo_results.pop(result_key, None)  # 대본이 바뀌었으니 지난 채점은 지운다
+            kept.pop(result_key, None)
             st.rerun()
-    if review_col.button(":material/replay: 수정하고 재도전 검토 받기", key=f"memo_review_{result_key}", type="primary", width="stretch"):
+    if practice:
+        review_col.caption("다른 질문은 연습만 해요. 점수는 이번 회차 면접 답으로만 계산해요.")
+    elif review_col.button(":material/replay: 수정하고 재도전 검토 받기", key=f"memo_review_{result_key}", type="primary", width="stretch"):
         used = state.retry_counts.get(no, 0)
         if not draft.strip():
             st.info("대본을 적은 뒤 눌러 주세요.")
@@ -1919,6 +2190,9 @@ def show_script_editor(no: int, result_key: str, original: str, text: str, ev: d
             st.info("위원 4명에게 평가받은 뒤에 재도전 검토를 받을 수 있어요. :material/forum: 면접 탭의 '위원 4명에게 평가받기' 를 눌러 주세요.")
         elif used >= coach.MAX_RETRIES:
             st.info(f"이 질문은 재도전 검토를 {coach.MAX_RETRIES}번 모두 받았어요. 고친 대본은 저장해서 연습할 수 있어요.")
+        elif " ".join(draft.split()) in graded_answers(no):
+            st.info("이미 채점받은 대본이라 다시 채점하지 않았어요 (재도전 기회는 그대로예요). "
+                    "대본을 고친 뒤 다시 누르거나, 연습만 하려면 '고친 대본 저장' 을 눌러 주세요.")
         else:
             last = ev["answers"][no - 1]
             new_answer = draft.strip()
@@ -1929,7 +2203,8 @@ def show_script_editor(no: int, result_key: str, original: str, text: str, ev: d
                 record_retry(no, attempt, last["score"])
                 state.retry_counts[no] = used + 1
                 state.memo_results.pop(result_key, None)
-                state.memo_reviews[result_key] = coach.compare(last["scores"], attempt["scores"])
+                state.memo_reviews[result_key] = len(state.retry_history[no]) - 1  # 몇 번째 재도전인지
+                kept.pop(result_key, None)
 
             if call_ai(
                 "고친 대본을 채점하고 있어요...",
@@ -1937,34 +2212,86 @@ def show_script_editor(no: int, result_key: str, original: str, text: str, ev: d
                 new_answer, RETRY_SCHEMA, "retry", store,
             ):
                 st.rerun()
-    if undo_col.button(":material/undo: 원래대로", key=f"memo_undo_{result_key}", width="stretch"):
-        state.memo_edits.pop(result_key, None)
-        state.memo_results.pop(result_key, None)
-        state.memo_draft_reset = result_key
-        st.rerun()
-    st.caption(
-        f"재도전 검토는 :material/replay: 재도전 탭과 같은 기준으로 채점하고, 질문당 {coach.MAX_RETRIES}번까지예요 "
-        f"(지금 {state.retry_counts.get(no, 0)}번). 검토를 받으면 이 답이 내 최신 답이 되어 종합 점수 · 리포트에 반영돼요."
-    )
-    show_review_result(result_key)
+    # 되돌리기는 고친 글을 지우므로 한 번 더 묻는다 (지운 글은 되살릴 수 없음)
+    ask_key = f"memo_undo_ask_{result_key}"
+    if undo_col.button(":material/undo: 원래 대본으로 되돌리기", key=f"memo_undo_{result_key}", width="stretch"):
+        state[ask_key] = True
+    if state.get(ask_key):
+        st.warning("고친 대본을 지우고 원래 대본으로 되돌릴까요? 지운 글은 되살릴 수 없어요.")
+        cancel_col, confirm_col = st.columns(2)
+        if cancel_col.button("고친 대본 남기기", key=f"memo_undo_cancel_{result_key}", width="stretch"):
+            state.pop(ask_key, None)
+            st.rerun(scope="fragment")
+        if confirm_col.button(":material/delete: 고친 대본 지우기", key=f"memo_undo_yes_{result_key}", width="stretch"):
+            state.pop(ask_key, None)
+            state.memo_edits.pop(result_key, None)
+            state.memo_results.pop(result_key, None)
+            state.memo_draft_reset = result_key
+            st.rerun()
+    if not practice:
+        st.caption(
+            f"재도전 검토는 :material/replay: 재도전 탭과 같은 기준으로 채점하고, 질문당 {coach.MAX_RETRIES}번까지예요 "
+            f"(지금 {state.retry_counts.get(no, 0)}번). 처음 점수보다 높으면 가장 높은 점수가 종합 점수 · 리포트에 반영돼요. "
+            "저장 · 검토 · 되돌리기를 마치면 이 창이 닫혀요."
+        )
 
 
-def show_review_result(result_key: str):
-    """'수정하고 재도전 검토 받기' 결과 (전 → 후). 자세한 건 재도전 탭에서."""
-    diff = state.memo_reviews.get(result_key)
-    if not diff:
+def show_review_result(no: int, result_key: str, ev: dict | None):
+    """'수정하고 재도전 검토 받기' 결과를 바로 아래에: 재도전 탭의 결과와 같은 구조 (show_retry_result)."""
+    index = state.memo_reviews.get(result_key)
+    history = state.get("retry_history", {}).get(no, [])
+    if not ev or not isinstance(index, int) or not 0 <= index < len(history):
         return
-    message = f"재도전 검토: {diff['before']} → {diff['after']}점 ({diff['diff']:+d})"
-    if diff["diff"] > 0:
-        st.success(f":material/celebration: 역전 성공! {message}")
-    elif diff["diff"] == 0:
-        st.info(message)
-    else:
-        st.warning(message + " · 재도전 탭에서 약한 점과 전략 가이드를 확인해 보세요.")
-    if st.button(":material/replay: 재도전 탭에서 자세히 보기", key=f"memo_review_go_{result_key}"):
-        state.go_retry_no = int(result_key.split(":")[0])
-        state.go_tab = RETRY_TAB
-        st.rerun()
+    with st.container(border=True):
+        st.markdown(f"**:material/fact_check: 재도전 검토 내역** · {index + 1}번째 재도전")
+        show_retry_result(no, ev, index, "memo", celebrate=True)
+
+
+MEMO_SCOPES = ["이번 회차 질문", "다른 질문 · 연습만"]
+
+
+def source_kind(label: str) -> str:
+    """답변 보기 이름의 종류: 회차 숫자가 들어간 이름(지난 n회차 답 · 내 연습 대본 (n회차))은 숫자를 빼고 본다."""
+    if label.startswith("지난 "):
+        return "지난 회차 답"
+    if label.startswith("내 연습 대본"):
+        return "내 연습 대본"
+    return label
+
+
+def remember_source(key: str):
+    state.memo_source_pref = source_kind(state[key])
+
+
+def pick_source(col, sources: dict, key: str, help_text: str) -> str:
+    """답변 보기: 한 번 고른 종류(예: 만점 예시 · 내가 쓴 대본)는 질문을 바꿔도 다른 것을 누를 때까지 그대로.
+    그 질문에 그 종류가 없으면 첫 번째(기본)로."""
+    options = list(sources)
+    match = next((o for o in options if source_kind(o) == state.get("memo_source_pref")), None)
+    if match:
+        state[key] = match  # 칸을 그리기 전이라 값을 정할 수 있다
+    elif state.get(key) not in options:
+        state.pop(key, None)
+    return col.radio("답변 보기", options, horizontal=True, key=key, help=help_text,
+                     on_change=remember_source, args=(key,))
+
+
+def step_question(key: str, options: list, delta: int):
+    """암기 탭 < > 버튼: 고르는 칸(key)을 이전 · 다음 질문으로. 버튼 콜백이라 칸을 그리기 전에 바뀐다."""
+    current = state.get(key)
+    i = options.index(current) if current in options else 0
+    state[key] = options[(i + delta) % len(options)]
+
+
+def other_questions() -> list[dict]:
+    """암기 탭 '다른 질문': 불러온 지난 회차 리포트의 질문(그 회차 최신 답)과 질문 은행의 나머지 질문 (coach.practice_questions)."""
+    reports = past_reports()
+    try:
+        bank = coach.load_questions()
+    except (OSError, ValueError, KeyError):
+        return []
+    return coach.practice_questions(reports, [q["question"] for q in state.questions], bank,
+                                    profile["job"], coach.field_of(profile))
 
 
 def show_memorize():
@@ -1990,35 +2317,92 @@ def show_memorize():
     if ev:
         totals_by_no = {a["no"]: a["score"] for a in ev["answers"]}
         scores = {no: state.retries[no]["score"] if no in state.retries else s for no, s in totals_by_no.items()}
-    labels = {
-        i + 1: f"질문 {i + 1}" + (f" · {scores[i + 1]}/{coach.ANSWER_MAX}점" if i + 1 in scores else "") + f" · {q['question']}"
-        for i, q in enumerate(state.questions)
-    }
-    question_col, source_col = st.columns([3, 2])
-    no = question_col.selectbox("외울 질문", list(labels), format_func=labels.get, key="memo_no")
-    question = state.questions[no - 1]
-    sources = {"내 최신 답": latest_answer(no)}
-    if ev and ev["answers"][no - 1]["needs_rewrite"] and ev["answers"][no - 1]["rewrite"].strip():
-        sources["AI 고친 답"] = ev["answers"][no - 1]["rewrite"]
-    source = source_col.radio("외울 답", list(sources), horizontal=True, key=f"memo_source_{no}",
-                              help="AI 고친 답은 14점 미만인 답에만 있어요.")
+    # 연습할 질문: 이번 회차 질문(점수 · 재도전 검토 있음) / 다른 질문(지난 회차 · 질문 은행, 연습만)
+    if state.get("memo_scope") not in MEMO_SCOPES:
+        state.memo_scope = MEMO_SCOPES[0]
+    scope = st.segmented_control("연습할 질문", MEMO_SCOPES, key="memo_scope", required=True,
+                                 help="다른 질문은 지난 회차 질문과 질문 은행의 질문이에요. 연습만 하고 점수에는 들어가지 않아요.")
+    practice = None
+    if scope == MEMO_SCOPES[0]:
+        labels = {
+            i + 1: f"질문 {i + 1}" + (f" · {scores[i + 1]}/{coach.ANSWER_MAX}점" if i + 1 in scores else "") + f" · {q['question']}"
+            for i, q in enumerate(state.questions)
+        }
+        question_col, source_col = st.columns([3, 2])
+        no = question_col.selectbox("외울 질문", list(labels), format_func=labels.get, key="memo_no")
+        question = state.questions[no - 1]
+        sources = {"내 최신 답": latest_answer(no)}
+        saved = coach.saved_practice(past_reports()).get(question["question"])
+        if saved:  # 지난 회차에 고친 연습 대본 (점수에는 들어가지 않는다)
+            sources[f"내 연습 대본 ({saved['round']}회차)"] = saved["script"]
+        if ev and ev["answers"][no - 1]["needs_rewrite"] and ev["answers"][no - 1]["rewrite"].strip():
+            sources["AI 고친 답"] = ev["answers"][no - 1]["rewrite"]
+        source = pick_source(source_col, sources, f"memo_source_{no}", "AI 고친 답은 14점 미만인 답에만 있어요.")
+        caption = f"질문 {no}" + (f" · 지금 점수 {scores[no]}/{coach.ANSWER_MAX}점" if no in scores else "")
+        pick_key, options = "memo_no", list(labels)
+    else:
+        others = other_questions()
+        if not others:
+            st.info("연습할 다른 질문이 없어요. 다음 회차 면접을 하면 지난 회차 질문이 여기에 쌓여요.")
+            return
+        by_id = {q["id"]: q for q in others}
+        question_col, source_col = st.columns([3, 2])
+        no = question_col.selectbox(
+            "외울 질문 (연습만)", list(by_id), key="memo_other",
+            format_func=lambda i: by_id[i]["question"] + (
+                f" · 지난 {by_id[i]['past']['round']}회차" if by_id[i]["past"]
+                else f" · {by_id[i]['saved']['round']}회차 연습" if by_id[i]["saved"] else ""),
+        )
+        question = by_id[no]
+        sources = {}
+        if question["saved"]:  # 지난 회차에 고치거나 직접 쓴 대본이 있으면 그걸 먼저
+            sources[f"내 연습 대본 ({question['saved']['round']}회차)"] = question["saved"]["script"]
+        if question["past"]:
+            sources[f"지난 {question['past']['round']}회차 답"] = question["past"]["answer"]
+        if question["example"]:
+            sources["만점 예시"] = question["example"]
+        sources["내가 쓴 대본"] = ""
+        source = pick_source(source_col, sources, f"memo_source_{no}",
+                             "만점 예시는 가상 지원자의 예시라 내 경험에 맞게 고쳐 쓰세요. '내가 쓴 대본' 은 직접 써서 외워요.")
+        practice = {"question": question["question"], "label": source}
+        options = list(by_id)
+        caption = f"다른 질문 {options.index(no) + 1}/{len(options)} · 연습만 (점수는 이번 회차 면접 답으로만 계산해요)"
+        pick_key = "memo_other"
     result_key = f"{no}:{source}"
     original = sources[source].strip()
     text = state.memo_edits.get(result_key, original).strip()  # 고친 대본이 있으면 그걸로 외운다
-    if not text:
-        st.info("이 질문에는 외울 답이 없어요.")
+    # 지금 질문을 크게: 질문을 보고 답하는 연습이라 질문이 화면의 첫 내용이어야 한다
+    # 양옆 < > 로 이전 · 다음 질문 (끝에서는 처음으로 돌아간다 · 버튼을 막지 않는다)
+    with st.container(border=True, key="memo_qcard"):
+        # < > 는 윗줄(질문 번호 · 점수) 양옆에만. 질문 글은 아랫줄에 카드 폭 전체로
+        prev_col, body_col, next_col = st.columns([1, 12, 1], vertical_alignment="center")
+        prev_col.button(":material/chevron_left:", key="memo_prev", help="이전 질문",
+                        on_click=step_question, args=(pick_key, options, -1))
+        body_col.caption(caption)
+        next_col.button(":material/chevron_right:", key="memo_next_q", help="다음 질문",
+                        on_click=step_question, args=(pick_key, options, 1))
+        st.markdown(f"#### {question['question']}")
+    if practice and not text:  # 다른 질문: 대본을 직접 쓰면 그때부터 연습할 수 있다
+        show_script_editor(no, result_key, original, text, None, practice)
         return
-    show_script_editor(no, result_key, original, text, ev)
+    if not text:
+        st.info("이 질문에는 아직 외울 답이 없어요. 재도전 탭에서 이 질문에 답하면 여기서 외울 수 있어요.")
+        if ev and st.button(":material/replay: 재도전 탭에서 답 쓰기", key=f"memo_empty_go_{no}"):
+            state.go_retry_no = no
+            state.go_tab = RETRY_TAB
+            st.rerun()
+        return
+    show_script_editor(no, result_key, original, text, ev, practice)
+    st.divider()
 
-    # 상위 모드: 텍스트 모드 / 말하기 모드. 외우는 전략은 두 모드 공통이라 작은 버튼으로.
-    mode_col, strategy_col = st.columns([4, 1], vertical_alignment="bottom")
+    # 답변 연습: 모드 → 단계 → 단계 내용 순서. 외우는 전략은 두 모드 공통이라 제목 옆 작은 버튼으로.
+    title_col, strategy_col = st.columns([4, 1], vertical_alignment="center")
+    title_col.subheader(":material/record_voice_over: 답변 연습")
+    with strategy_col.popover(":material/push_pin: 전략 보기", width="stretch"):
+        show_memo_strategy()
     if state.get("memo_top") not in (TEXT_MODE, SPEAK_MODE):
         state.memo_top = TEXT_MODE
-    with mode_col:
-        top = st.segmented_control("모드", [TEXT_MODE, SPEAK_MODE], key="memo_top", required=True, width="stretch")
-    with strategy_col.popover(":material/push_pin: 전략", width="stretch"):
-        show_memo_strategy()
-    st.divider()
+    top = st.segmented_control("모드", [TEXT_MODE, SPEAK_MODE], key="memo_top", required=True, width="stretch")
 
     if top == SPEAK_MODE:
         show_speaking(result_key, text, question["question"])
@@ -2027,9 +2411,7 @@ def show_memorize():
     # 텍스트 모드: 누른 단계의 기능만 보인다
     if state.get("memo_view") not in coach.MEMO_MODES:
         state.memo_view = coach.MEMO_MODES[0]
-    view = st.segmented_control(
-        "텍스트 단계", coach.MEMO_MODES, key="memo_view", required=True, label_visibility="collapsed", width="stretch",
-    )
+    view = st.segmented_control("단계", coach.MEMO_MODES, key="memo_view", required=True, width="stretch")
     mode_index = coach.MEMO_MODES.index(view)
     level = None
     if mode_index == 0:
@@ -2049,8 +2431,8 @@ def show_memorize():
 
 # 탭 = 단계. 이름 앞 번호로 순서를 보여 주고, 위의 단계 표시가 완료 · 남은 단계를 알려 준다.
 CHAT_TAB, EVAL_TAB, RETRY_TAB = ":material/forum: 1. 면접", ":material/bar_chart: 2. 평가", ":material/replay: 3. 재도전"
-LAST_TAB, VERDICT_TAB = ":material/live_help: 4. 마지막 질문", ":material/mail: 5. 최종 결과"
-MEMO_TAB, REPORT_TAB = ":material/psychology: 6. 암기", ":material/description: 7. 리포트"
+VERDICT_TAB, MEMO_TAB = ":material/mail: 4. 최종 결과", ":material/psychology: 5. 암기"
+LAST_TAB = ":material/live_help: 6. 점검하기"  # 사전 정보 탐색 · 마지막에 할 질문
 FEEDBACK_URL = os.getenv("FEEDBACK_SURVEY_URL", "").strip()  # 다 마친 뒤 설문 링크 (.env · Streamlit Secrets)
 if not FEEDBACK_URL.startswith("https://"):
     FEEDBACK_URL = ""
@@ -2058,23 +2440,15 @@ if not FEEDBACK_URL.startswith("https://"):
 
 def step_status() -> list[dict]:
     """단계마다 이름 · 완료 여부 · 선택 단계 여부. 완료는 그 단계에서 실제로 한 일이 있을 때."""
-    return [
-        {"tab": CHAT_TAB, "name": "면접", "done": state.stage == "done", "optional": False},
-        {"tab": EVAL_TAB, "name": "평가", "done": bool(state.evaluation), "optional": False},
-        {"tab": RETRY_TAB, "name": "재도전", "done": bool(state.get("retry_history")), "optional": True},
-        {"tab": LAST_TAB, "name": "마지막 질문", "done": bool(state.last_suggest or state.last_question), "optional": True},
-        {"tab": VERDICT_TAB, "name": "최종 결과", "done": bool(state.verdict_open), "optional": False},
-        {"tab": MEMO_TAB, "name": "암기", "done": bool(state.memo_results or state.speak_logs), "optional": True},
-        {"tab": REPORT_TAB, "name": "리포트", "done": bool(state.get("report_downloaded")), "optional": False},
-    ]
+    tabs = [CHAT_TAB, EVAL_TAB, RETRY_TAB, VERDICT_TAB, MEMO_TAB, LAST_TAB, None]  # 마지막은 리포트 버튼
+    return [{"tab": tab, "name": r["item"], "done": r["done"], "optional": r["optional"]}
+            for tab, r in zip(tabs, checklist_rows())]
 
 
 def show_stepper(steps: list[dict]):
     """단계 진행: 'n단계 중 n단계 완료 · 남은 단계 n개' 와 진행 막대만 (탭 이름에 단계 번호가 있어 중복 표시는 하지 않는다)."""
     done = sum(s["done"] for s in steps)
-    left = len(steps) - done
-    text = f"{len(steps)}단계 중 {done}단계 완료 · 남은 단계 {left}개" if left else f"{len(steps)}단계를 모두 마쳤어요"
-    st.progress(done / len(steps), text=text)
+    st.progress(done / len(steps), text=coach.checklist_summary(steps))  # 리포트 창 체크리스트와 같은 문장
 
 
 def mark_report_downloaded():
@@ -2106,8 +2480,8 @@ if state.get("go_retry_no"):
 # 탭은 면접 시작부터 항상 같은 모양 · 같은 key 로 둔다. 화면 구조가 바뀌면
 # Streamlit이 대화를 다시 그리면서 스크롤이 맨 위로 올라가기 때문이다.
 show_stepper(step_status())
-chat_tab, eval_tab, retry_tab, last_tab, verdict_tab, memo_tab, report_tab = st.tabs(
-    [CHAT_TAB, EVAL_TAB, RETRY_TAB, LAST_TAB, VERDICT_TAB, MEMO_TAB, REPORT_TAB], key="view", on_change="rerun"
+chat_tab, eval_tab, retry_tab, verdict_tab, memo_tab, last_tab = st.tabs(
+    [CHAT_TAB, EVAL_TAB, RETRY_TAB, VERDICT_TAB, MEMO_TAB, LAST_TAB], key="view", on_change="rerun"
 )
 
 with chat_tab:
@@ -2168,17 +2542,28 @@ with memo_tab:
     else:
         st.info("면접을 마치면 내 답을 외우는 연습을 할 수 있어요.")
 
-with report_tab:
+
+
+@st.dialog("면접 리포트", width="large")
+def report_dialog():
+    """위쪽 :material/description: 리포트 버튼 · 최종 결과의 '성장 리포트 보기' 가 여는 넓은 창.
+    창 안의 다운로드는 창만 다시 그려서, 받은 뒤 마침 안내(설문)가 창 안에 바로 보인다."""
     if state.evaluation:
         show_report(state.evaluation)
         if state.get("report_downloaded"):
             show_finish()
     else:
-        st.info("위원 4명에게 평가받으면 면접리포트.md 를 받을 수 있어요.")
+        st.info("위원 4명에게 평가받으면 면접리포트.md 를 받을 수 있어요. :material/forum: 면접 탭에서 질문 5개를 마친 뒤 평가받아 주세요.")
+
+
+if state.pop("open_report", False):
+    report_dialog()
+if state.pop("open_next_round", False) and state.get("evaluation"):
+    next_round_dialog()
 
 # 면접이 끝나도 평가받기 전까지는 입력창을 둔다 (맨 아래 고정 입력창이 사라지면 페이지 높이가 바뀌며 스크롤이 튄다).
 # 평가를 받은 뒤에는 뺀다: 입력창이 있으면 Streamlit 이 화면을 '맨 아래에 붙여' 두어서,
-# 리포트처럼 긴 내용이 그려질 때 저절로 맨 아래로 내려가기 때문이다. 이동은 오른쪽 아래 맨 위 · 맨 아래 버튼으로.
+# 긴 내용이 그려질 때 저절로 맨 아래로 내려가기 때문이다.
 if state.stage == "done":
     if not state.evaluation:
         pass_input = st.chat_input("면접이 끝났어요. 위원 4명에게 평가받아 보세요.")
