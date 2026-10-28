@@ -36,11 +36,13 @@ TOTAL_MAX = ANSWER_MAX * TOTAL_QUESTIONS  # 종합 점수 100
 
 # 최종 판결 (모의면접 학습 지표 — 실제 채용 결과와 무관)
 # 합격 = 종합 PASS_TOTAL 이상 + 위원 평균 PASS_PANEL 이상
-# 합격 후보 = 종합 PASS_TOTAL 이상 + 위원 평균 CANDIDATE_PANEL 이상 PASS_PANEL 미만
-PASS_TOTAL = 70        # 최신 종합 점수(0~100) 이상
+# 합격 후보 = 종합 CANDIDATE_TOTAL 이상 + 위원 평균 CANDIDATE_PANEL 이상 (합격이 아닐 때)
+# 평가 탭 타이틀(EVAL_TITLES)도 같은 기준을 쓴다.
+PASS_TOTAL = 90        # 합격선: 최신 종합 점수(0~100)
 PASS_PANEL = 9.0       # 합격선: 위원 평균(0~10)
+CANDIDATE_TOTAL = 70   # 합격 후보선: 최신 종합 점수(0~100)
 CANDIDATE_PANEL = 7.0  # 합격 후보선: 위원 평균(0~10)
-VERDICT_LABELS = {"pass": "합격", "candidate": "합격 후보", "more": "추가 학습 필요"}
+VERDICT_LABELS = {"pass": "합격", "candidate": "합격 후보", "more": "재도전 필요"}  # 리포트 데이터에는 level(pass · candidate · more)만 남긴다
 MAX_CLUES = 2       # 역전의 실마리: 가장 낮은 답 몇 개
 
 # OpenAI 로 보내는 글의 길이 상한 · 재도전 횟수 상한 (사용량 줄이기)
@@ -83,7 +85,16 @@ def load_questions(path: Path = QUESTIONS_PATH) -> pd.DataFrame:
     if "분야" not in df.columns:  # 분야 칸이 생기기 전 질문 은행은 모두 공통
         df["분야"] = DEFAULT_FIELD
     df["분야"] = df["분야"].fillna(DEFAULT_FIELD)
+    if "만점 예시" not in df.columns:  # 만점 예시 칸이 생기기 전 질문 은행
+        df["만점 예시"] = ""
+    df["만점 예시"] = df["만점 예시"].fillna("")
     return df
+
+
+def question_row(row) -> dict:
+    """질문 은행 한 줄 → 면접에서 쓰는 질문. example: 가상 지원자의 만점 예시 답 (사용자 정보와 무관, 없으면 빈칸)."""
+    return {"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"],
+            "example": str(row["만점 예시"]).strip()}
 
 
 def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD) -> list[dict]:
@@ -106,8 +117,7 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD) -> li
         pool = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
         if pool.empty:
             raise ValueError(f"'{job}' 직군 질문이 질문 은행에 부족해요.")
-        row = pool.sample(1).iloc[0]
-        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"]})
+        picked.append(question_row(pool.sample(1).iloc[0]))
     assert len(picked) == TOTAL_QUESTIONS
     return picked
 
@@ -170,12 +180,43 @@ def total_scores(evaluation: dict, retries: dict) -> dict:
     return {"first": first, "latest": latest, "diff": latest - first, "max": TOTAL_MAX}
 
 
-def pick_clues(evaluation: dict, count: int = MAX_CLUES) -> list[dict]:
-    """역전의 실마리: 만점이 아닌 답 중 가장 낮은 답 count 개(같은 점수면 앞 번호)와
-    각 답의 가장 낮은 기준 1개(같으면 기준 순서). 모두 만점이면 빈 목록."""
+def reflected_retry(original_score: int, history: list[dict]) -> dict | None:
+    """최고 점수 반영: 처음 점수보다 높은 재도전 중 가장 높은 것 (같은 점수면 나중 것). 없으면 None (처음 점수 반영).
+    state.retries[no] 에는 이 값만 넣는다 → 종합 점수 · 판정 · 실마리 · 리포트가 모두 최고 점수를 쓴다."""
+    best = None
+    for attempt in history:
+        if attempt["score"] > original_score and (best is None or attempt["score"] >= best["score"]):
+            best = attempt
+    return best
+
+
+def failed_retries(original_score: int, history: list[dict]) -> list[tuple[int, dict]]:
+    """반영되지 않은 재도전 (몇 번째, 재도전). 처음 점수보다 낮거나 같은 것, 더 높은 재도전에 밀린 것."""
+    best = reflected_retry(original_score, history)
+    return [(i, a) for i, a in enumerate(history, 1) if a is not best]
+
+
+def latest_answers(evaluation: dict, retries: dict | None = None) -> list[dict]:
+    """답마다 최신 점수: 재도전한 답은 재도전 점수 · 기준 점수 · 약한 점으로 바꾼다."""
+    retries = retries or {}
+    return [
+        {**a, **{k: retries[a["no"]][k] for k in ("scores", "score", "weak")}} if a["no"] in retries else a
+        for a in evaluation["answers"]
+    ]
+
+
+def pick_clues(evaluation: dict, count: int = MAX_CLUES, retries: dict | None = None,
+               retry_counts: dict | None = None) -> list[dict]:
+    """역전의 실마리: 최신 점수로 만점이 아닌 답 중 가장 낮은 답 count 개(같은 점수면 앞 번호)와
+    각 답의 가장 낮은 기준 1개(같으면 기준 순서). 모두 만점이면 빈 목록.
+    retry_count 는 실마리를 찾은 때의 재도전 횟수 (그 뒤에 재도전했는지 clue_progress 가 본다)."""
     order = list(CRITERIA)
+    retry_counts = retry_counts or {}
+    # 재도전을 MAX_RETRIES 번 모두 쓴 답은 더 고칠 수 없어서 실마리로 고르지 않는다
     candidates = sorted(
-        (a for a in evaluation["answers"] if a["score"] < ANSWER_MAX), key=lambda x: (x["score"], x["no"])
+        (a for a in latest_answers(evaluation, retries)
+         if a["score"] < ANSWER_MAX and retry_counts.get(a["no"], 0) < MAX_RETRIES),
+        key=lambda x: (x["score"], x["no"]),
     )
     clues = []
     for a in candidates[:count]:
@@ -183,33 +224,95 @@ def pick_clues(evaluation: dict, count: int = MAX_CLUES) -> list[dict]:
         clues.append({
             "no": a["no"], "question": a["question"], "score": a["score"], "weak": a["weak"],
             "criterion": key, "name": CRITERIA[key], "criterion_score": a["scores"][key],
+            "retry_count": retry_counts.get(a["no"], 0),
         })
     return clues
 
 
+def clue_progress(clues: list[dict], evaluation: dict, retries: dict, retry_counts: dict) -> dict:
+    """실마리마다 찾은 뒤 재도전했는지 · 점수 전 → 후. done: 실마리를 모두 재도전했으면 True (다시 찾기 가능)."""
+    latest = {a["no"]: a["score"] for a in latest_answers(evaluation, retries)}
+    rows = []
+    for clue in clues:
+        retried = retry_counts.get(clue["no"], 0) > clue.get("retry_count", 0)
+        after = latest[clue["no"]]
+        rows.append({"no": clue["no"], "retried": retried, "before": clue["score"], "after": after,
+                     "diff": after - clue["score"], "up": retried and after > clue["score"]})
+    return {"rows": rows, "done": bool(rows) and all(r["retried"] for r in rows)}
+
+
+def highlight_criteria() -> list[dict]:
+    """형광펜 기준표: HIGHLIGHT 지시문의 [기준] 줄(- key(이름): 설명)을 그대로 읽는다.
+    AI에게 준 기준과 화면의 표가 늘 같게 하려고 문장을 따로 적지 않는다 (prompts.py 는 읽기만)."""
+    return [
+        {"key": key, "name": name, "rule": rule.strip()}
+        for key, name, rule in re.findall(r"^- (\w+)\(([^)]+)\): (.+)$", HIGHLIGHT, re.MULTILINE)
+        if key in CRITERIA
+    ]
+
+
+def perfect_hints(evaluation: dict) -> list[dict]:
+    """모두 만점일 때 '힌트 확인하기': 평가에 이미 들어 있는 더 다듬을 점 · 다듬은 답 · 확인할 것을 답마다 모은다.
+    AI를 새로 부르지 않는다. 셋 다 비어 있는 답은 뺀다."""
+    return [
+        {"no": a["no"], "question": a["question"], "weak": a["weak"], "rewrite": a["rewrite"], "check": a["check"]}
+        for a in evaluation["answers"]
+        if a["weak"] or a["rewrite"] or a["check"]
+    ]
+
+
+MOCK_PATH = Path(__file__).parent / "data" / "mock_perfect.json"
+
+
+def load_mock(path: Path = MOCK_PATH) -> dict:
+    """개발용 모의 데이터(만점)를 리포트 데이터와 같은 모양으로 읽는다. 점수 · 합계는 rebuild_session 이 다시 계산한다."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    session = _parse_session(raw.get("session"))
+    if session is None:
+        raise ValueError("모의 데이터의 session 모양이 달라요.")
+    return {**raw, "session": session}
+
+
+# 평가 탭 타이틀: (위원 평균 이상, 최신 종합 이상, 타이틀) — 위에서부터 먼저 맞는 것. 둘 다 넘어야 그 단계.
+EVAL_TITLES = [
+    (PASS_PANEL, PASS_TOTAL, "이제 남은 것은 연습입니다."),
+    (CANDIDATE_PANEL, CANDIDATE_TOTAL, "한 걸음만 더 가면 됩니다."),
+    (0.0, 0, "승부는 지금부터입니다."),
+]
+
+
+def eval_title(totals: dict, panel_average: float) -> str:
+    """평가 탭 타이틀. 최신 종합(재도전 최고 점수 반영)과 위원 평균으로 코드가 고른다."""
+    return next(title for panel, total, title in EVAL_TITLES
+                if panel_average >= panel and totals["latest"] >= total)
+
+
 def verdict(totals: dict, panel_average: float) -> dict:
-    """최종 판결: pass(합격) · candidate(합격 후보) · more(추가 학습 필요).
+    """최종 판결: pass(합격) · candidate(합격 후보) · more(재도전 필요).
     short 는 '다음 단계' 까지 모자란 점수 (합격이면 빈 목록)."""
-    total_ok = totals["latest"] >= PASS_TOTAL
-    if total_ok and panel_average >= PASS_PANEL:
+    latest = totals["latest"]
+    if latest >= PASS_TOTAL and panel_average >= PASS_PANEL:
         level = "pass"
-    elif total_ok and panel_average >= CANDIDATE_PANEL:
+    elif latest >= CANDIDATE_TOTAL and panel_average >= CANDIDATE_PANEL:
         level = "candidate"
     else:
         level = "more"
 
-    target_panel = PASS_PANEL if level == "candidate" else CANDIDATE_PANEL
+    # 다음 단계: 합격 후보 → 합격, 재도전 필요 → 합격 후보
+    target_panel, target_total = (PASS_PANEL, PASS_TOTAL) if level == "candidate" else (CANDIDATE_PANEL, CANDIDATE_TOTAL)
     short = []
+    # 재도전은 종합 점수만 올린다. 위원 평균은 다음 회차 면접에서만 바뀌므로 안내를 나눈다.
+    panel_short = level != "pass" and panel_average < target_panel
     if level != "pass":
-        if not total_ok:
-            short.append(f"종합 점수 {PASS_TOTAL - totals['latest']}점")
+        if latest < target_total:
+            short.append(f"종합 점수 {target_total - latest}점")
         if panel_average < target_panel:
             # 0.1 단위로 올림 (8.99 처럼 바로 아래일 때 '0.0점 부족' 으로 보이지 않게)
             gap = math.ceil(round((target_panel - panel_average) * 10, 6)) / 10
             short.append(f"위원 평균 {gap:.1f}점")
     return {
         "level": level, "label": VERDICT_LABELS[level], "passed": level == "pass",
-        "total": totals["latest"], "panel": panel_average, "short": short,
+        "total": totals["latest"], "panel": panel_average, "short": short, "panel_short": panel_short,
     }
 
 
@@ -320,7 +423,7 @@ def mark_words(text: str) -> list[tuple[str, str]]:
     return [(word, "key" if is_keyword(word) else "rest") for word in text.split()]
 
 
-MEMO_TAGS = {1: "🟢 가볍게", 2: "🟡 절반", 3: "🔴 전부"}  # 빈칸 채우기 태그 (가리는 양)
+MEMO_TAGS = {1: "가볍게", 2: "절반", 3: "전부"}  # 빈칸 채우기 태그 (가리는 양). 아이콘은 화면에서만 붙인다
 
 
 def step_label(index: int) -> str:
@@ -372,7 +475,7 @@ def intro_feedback(seconds: int) -> tuple[str, str]:
 
 
 # ── 말하기 모드: 1단계 대본 읽기 → 2단계 힌트(뼈대 → 빈칸 가볍게 · 절반 · 전부) → 3단계 대본 없이 ──
-SPEAK_STEP_NAMES = {1: "📖 1단계 · 대본 보고 읽기", 2: "👀 2단계 · 힌트 보고 말하기", 3: "🙈 3단계 · 대본 없이 말하기"}
+SPEAK_STEP_NAMES = {1: "1단계 · 대본 보고 읽기", 2: "2단계 · 힌트 보고 말하기", 3: "3단계 · 대본 없이 말하기"}
 SPEAK_HINTS = {"skeleton": "뼈대", 1: MEMO_TAGS[1], 2: MEMO_TAGS[2], 3: MEMO_TAGS[3]}  # 2단계 힌트: 점점 적게
 SPEAK_PHASES = ["read", "hint:skeleton", "hint:1", "hint:2", "hint:3", "speak"]  # 점진적으로 연습하는 순서
 
@@ -413,7 +516,7 @@ def phase_feedback(read_s: int | None, seconds: int, phase: str, text: str, ques
         return [("info", f"{label} {seconds}초 · 내 읽기 속도는 1초에 {reading_speed(seconds, text):.1f}자예요. "
                          "이제 2단계로 힌트를 보며 말해 보세요.")]
     if not read_s:
-        return [("info", f"{label} {seconds}초. 먼저 📖 1단계 대본 보고 읽기를 재면 얼마나 막혔는지 비교할 수 있어요.")]
+        return [("info", f"{label} {seconds}초. 먼저 1단계 대본 보고 읽기를 재면 얼마나 막혔는지 비교할 수 있어요.")]
     gap = seconds - read_s
     ratio = gap / read_s
     following, easier = next_phase(phase), easier_phase(phase)
@@ -588,7 +691,7 @@ def format_record(questions: list[dict], messages: list[dict]) -> str:
     for i, q in enumerate(questions):
         lines = [f"[질문 {i + 1} · {q['type']}] {q['question']}"]
         lines += [
-            f"[{names[m['role']]}] {m['content']}"
+            f"[{names[m['role']]}] {plain(m['content'])}"
             for m in messages
             if m.get("q") == i and m.get("kind") != "question"
         ]
@@ -596,10 +699,18 @@ def format_record(questions: list[dict], messages: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+ICON_CODE = re.compile(r":material/[a-z0-9_]+:\s?")
+
+
+def plain(text: str) -> str:
+    """화면용 아이콘 표기(:material/…:)를 뺀 글 (AI 에게는 보내지 않는다)."""
+    return ICON_CODE.sub("", text)
+
+
 def format_transcript(messages: list[dict]) -> str:
     """지금까지의 대화를 AI에게 넘길 글로 만든다."""
     names = {"assistant": "면접관", "user": "지원자"}
-    return "\n".join(f"[{names[m['role']]}] {m['content']}" for m in messages)
+    return "\n".join(f"[{names[m['role']]}] {plain(m['content'])}" for m in messages)
 
 
 def clamp(value, low: int, high: int) -> int:
@@ -641,6 +752,59 @@ def summarize_retry(raw: dict) -> dict:
     return {"scores": scores, "score": answer_score(scores), "weak": str(raw.get("weak", ""))}
 
 
+# 위원 코치 피드백 (AI 호출 없음): 위원마다 PANEL_CRITERIA 에 가까운 기준 2개의 점수 변화로 고정 문장을 고른다.
+# 첫 기준은 위원마다 달라서 4명이 기준 4개를 나눠 말한다 (같은 문장 되풀이 방지).
+PANEL_FOCUS = {
+    "실무 전문가": ["relevance", "specific"],      # 직무 지식 · 실제 업무에 쓸 경험
+    "논리 분석가": ["evidence", "structure"],      # 주장과 근거 · 문제 → 원인 → 해결 → 결과
+    "커뮤니케이션 전문가": ["structure", "relevance"],  # 결론부터 간결 · 질문 의도에 맞게
+    "채용 담당자": ["specific", "relevance"],      # 성장 가능성을 보여 주는 실제 경험 · 회사 · 직무 적합성
+}
+COACH_UP = {
+    "specific": "상황 · 숫자가 더 구체적으로 보여요.",
+    "relevance": "직무와의 연결이 분명해졌어요.",
+    "structure": "답의 흐름이 더 분명해졌어요.",
+    "evidence": "근거와 확인 방법이 더 생겼어요.",
+}
+COACH_DOWN = {
+    "specific": "구체적인 상황 · 숫자가 줄었어요. 지난 답의 숫자를 되살려 보세요.",
+    "relevance": "직무와의 연결이 약해졌어요. 이 경험을 회사 업무와 이어 주세요.",
+    "structure": "흐름이 흐려졌어요. 결론을 첫 문장에 두세요.",
+    "evidence": "근거가 줄었어요. 데이터나 테스트 결과를 한 줄 넣어 보세요.",
+}
+COACH_SAME = {
+    "specific": "숫자나 사례를 하나 더 넣으면 올라가요.",
+    "relevance": "회사 · 직무와 연결하는 한 문장을 더해 보세요.",
+    "structure": "결론 → 이유 → 결과 순서로 다시 배치해 보세요.",
+    "evidence": "어떻게 확인했는지(테스트 · 데이터)를 넣어 보세요.",
+}
+
+
+def panel_coaching(before: dict, after: dict) -> list[dict]:
+    """재도전 전 → 후 기준 점수로 위원 4명의 코칭 한 문장씩.
+    위원마다 첫 기준(주 기준)으로 말한다. 주 기준이 서로 달라서 4명이 같은 말을 하지 않는다.
+    둘째 기준은 changes 에 점수 변화만 함께 보여 준다."""
+    rows = []
+    for role, keys in PANEL_FOCUS.items():
+        key = keys[0]
+        changes = " · ".join(f"{CRITERIA[k]} {before[k]}→{after[k]}" for k in keys)
+        if after[key] != before[key]:
+            trend = "up" if after[key] > before[key] else "down"
+            message = (COACH_UP if trend == "up" else COACH_DOWN)[key]
+        else:
+            trend = "same"
+            message = COACH_SAME[key] if after[key] < CRITERION_MAX else f"{_topic(CRITERIA[key])} 만점이에요. 이대로 지켜 주세요."
+        rows.append({"role": role, "changes": changes, "message": message, "trend": trend})
+    return rows
+
+
+def _topic(word: str) -> str:
+    """은/는: 마지막 글자에 받침이 있으면 '은', 없으면 '는'."""
+    last = word[-1]
+    has_final = "가" <= last <= "힣" and (ord(last) - ord("가")) % 28 != 0
+    return word + ("은" if has_final else "는")
+
+
 def compare(before: dict, after: dict) -> dict:
     """전 → 후 점수 차이. before · after 는 기준별 점수 dict."""
     rows = [
@@ -678,13 +842,152 @@ def report_file_name(company: str, job: str, round_no: int, day: date | None = N
     return f"{day_text}-{_file_part(company)}-{job}-{round_no}회차-면접리포트.md"
 
 
+MAX_SESSION_MESSAGES = 40  # 면접 대화는 질문 5개 × (질문 · 답 · 꼬리 질문 · 답 · 반응) 안쪽
+
+
+def session_data(
+    messages: list[dict],
+    evaluation: dict,
+    retries: dict,
+    retry_counts: dict | None = None,
+    last_suggest: list | None = None,
+    last_question: dict | None = None,
+    understanding: int | None = None,
+    retry_history: dict | None = None,
+) -> dict:
+    """'면접 없이 이어 하기' 용: 이 회차의 대화 · 평가 · 재도전(반영된 것 · 모든 기록) · 마지막 질문을 그대로 남긴다.
+    평가는 AI 응답과 같은 모양으로 남겨서, 읽을 때 summarize_evaluation() 으로 다시 검증 · 계산한다."""
+    return {
+        "messages": [
+            {"role": m["role"], "content": m["content"], "q": m.get("q"), "kind": m.get("kind")}
+            for m in messages
+        ],
+        "evaluation": {
+            "panel": [{k: m[k] for k in ("role", "against", "good", "score")} for m in evaluation["panel"]],
+            "conflict": evaluation["conflict"],
+            "agree": evaluation["agree"],
+            "answers": [
+                {"no": a["no"], **a["scores"], "weak": a["weak"], "rewrite": a["rewrite"], "check": a["check"]}
+                for a in evaluation["answers"]
+            ],
+            "next": evaluation["next"],
+        },
+        "retries": {str(no): {"answer": r["answer"], **r["scores"], "weak": r["weak"]} for no, r in retries.items()},
+        "retry_history": {
+            str(no): [{"answer": r["answer"], **r["scores"], "weak": r["weak"]} for r in attempts]
+            for no, attempts in (retry_history or {}).items()
+        },
+        "retry_counts": {str(no): n for no, n in (retry_counts or {}).items()},
+        "last_suggest": [list(pair) for pair in (last_suggest or [])],
+        "last_question": (
+            {"questions": [list(p) for p in last_question["questions"]], "why": last_question["why"]}
+            if last_question else None
+        ),
+        "understanding": understanding,
+    }
+
+
+def _trim(value, depth: int = 0):
+    """리포트에서 읽은 값: 글은 MAX_FIELD_CHARS 로 자르고, 목록 · 사전은 크기를 제한한다 (이상한 파일 대비)."""
+    if depth > 6:  # session → evaluation → answers → 답 하나 → check → 글 (깊이 5)
+        return None
+    if isinstance(value, str):
+        return value.strip()[:MAX_FIELD_CHARS]
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list):
+        return [_trim(v, depth + 1) for v in value[:MAX_SESSION_MESSAGES]]
+    if isinstance(value, dict):
+        return {str(k)[:40]: _trim(v, depth + 1) for k, v in list(value.items())[:MAX_SESSION_MESSAGES]}
+    return None
+
+
+def _parse_session(raw) -> dict | None:
+    """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가)."""
+    if not isinstance(raw, dict):
+        return None
+    raw = _trim(raw)
+    messages = []
+    for m in raw.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") not in ("assistant", "user") or not isinstance(m.get("content"), str):
+            continue
+        q = m.get("q")
+        messages.append({
+            "role": m["role"],
+            "content": m["content"],
+            "q": q if isinstance(q, int) and 0 <= q < TOTAL_QUESTIONS else None,
+            "kind": "question" if m.get("kind") == "question" else None,
+        })
+    evaluation = raw.get("evaluation")
+    if not messages or not isinstance(evaluation, dict):
+        return None
+    return {**raw, "messages": messages}
+
+
+def rebuild_session(session: dict, questions: list[dict]) -> dict:
+    """리포트의 session 으로 면접 끝난 상태를 다시 만든다. 점수 · 합계는 여기서 다시 검증 · 계산한다."""
+    evaluation = summarize_evaluation(session["evaluation"], questions)
+    def attempt(r) -> dict | None:
+        return {"answer": r["answer"], **summarize_retry(r)} if isinstance(r, dict) and isinstance(r.get("answer"), str) else None
+
+    def question_no(key) -> int | None:
+        return int(key) if str(key).isdigit() and 1 <= int(key) <= TOTAL_QUESTIONS else None
+
+    # 모든 재도전 기록. 기록이 없는 옛 리포트는 남아 있던 재도전 하나를 기록으로 쓴다.
+    history = {}
+    for key, items in (session.get("retry_history") or {}).items():
+        attempts = [a for a in (attempt(r) for r in (items if isinstance(items, list) else [])) if a][:MAX_RETRIES]
+        if question_no(key) and attempts:
+            history[question_no(key)] = attempts
+    for key, r in (session.get("retries") or {}).items():
+        if question_no(key) and question_no(key) not in history and attempt(r):
+            history[question_no(key)] = [attempt(r)]
+    # 반영 점수는 기록에서 다시 고른다 (최고 점수 반영 · 옛 리포트의 낮은 재도전도 여기서 걸러진다)
+    original = {a["no"]: a["score"] for a in evaluation["answers"]}
+    retries = {}
+    for no, attempts in history.items():
+        best = reflected_retry(original[no], attempts)
+        if best:
+            retries[no] = best
+    retry_counts = {
+        int(k): clamp(v, 0, MAX_RETRIES)
+        for k, v in (session.get("retry_counts") or {}).items()
+        if str(k).isdigit() and 1 <= int(k) <= TOTAL_QUESTIONS
+    }
+
+    def pairs(items) -> list[tuple[str, str]]:
+        return [
+            (p[0], p[1]) for p in items or []
+            if isinstance(p, list) and len(p) == 2 and p[0] in LAST_ANGLES and isinstance(p[1], str)
+        ]
+
+    last_question = session.get("last_question")
+    if isinstance(last_question, dict):
+        last_question = {"questions": pairs(last_question.get("questions")), "why": str(last_question.get("why") or "")}
+    else:
+        last_question = None
+    understanding = session.get("understanding")
+    return {
+        "messages": session["messages"],
+        "evaluation": evaluation,
+        "retries": retries,
+        "retry_history": history,
+        "retry_counts": retry_counts,
+        "last_suggest": pairs(session.get("last_suggest")) or None,
+        "last_question": last_question if last_question and last_question["questions"] else None,
+        "understanding": clamp(understanding, 0, 100) if isinstance(understanding, int) else None,
+    }
+
+
 def report_data(
-    profile: dict, questions: list[dict], evaluation: dict, retries: dict, round_no: int, precheck: dict, day: date
+    profile: dict, questions: list[dict], evaluation: dict, retries: dict, round_no: int, precheck: dict, day: date,
+    session: dict | None = None,
 ) -> dict:
     """다음 면접에서 이어 하기 위해 리포트에 숨겨 둘 데이터. 이 회차 데이터만 넣는다 (지난 회차는 넣지 않음).
-    total_* · criteria_version · passed 는 나중에 더한 칸이라, 없는 옛 리포트도 그대로 읽힌다."""
+    total_* · criteria_version · passed · session 은 나중에 더한 칸이라, 없는 옛 리포트도 그대로 읽힌다."""
     totals = total_scores(evaluation, retries)
     return {
+        "session": session,
         "total_first": totals["first"],
         "total_latest": totals["latest"],
         "passed": verdict(totals, evaluation["panel_average"])["passed"],
@@ -754,6 +1057,7 @@ def parse_report(text: str) -> dict:
     total_latest = raw.get("total_latest")  # 종합 점수 기능 전 리포트에는 없다
     version = raw.get("criteria_version")
     return {
+        "session": _parse_session(raw.get("session")),  # 결과 저장 기능 전 리포트는 None
         "total_latest": clamp(total_latest, 0, TOTAL_MAX) if isinstance(total_latest, int) else None,
         "criteria_version": version.strip()[:16] if isinstance(version, str) else "",
         "precheck": precheck,
@@ -775,8 +1079,7 @@ def match_questions(df: pd.DataFrame, job: str, texts: list[str]) -> list[dict] 
         rows = bank[bank["질문"] == text]
         if rows.empty:
             return None
-        row = rows.iloc[0]
-        picked.append({"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"]})
+        picked.append(question_row(rows.iloc[0]))
     return picked if len(picked) == TOTAL_QUESTIONS else None
 
 
@@ -846,8 +1149,11 @@ def build_report(
     precheck: dict | None = None,
     updated_at: str | None = None,
     day: date | None = None,
+    retry_counts: dict | None = None,
+    understanding: int | None = None,
+    retry_history: dict | None = None,
 ) -> str:
-    """면접리포트.md.
+    """면접리포트.md. 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
     AI가 쓴 글은 'AI 의견' 으로 구분해 넣는다. 끝에는 이 회차의 이어 하기 데이터를 숨겨 둔다.
     day 는 사용자 시간대의 오늘 (배포 서버 날짜는 UTC 라서 하루 다를 수 있다)."""
@@ -889,14 +1195,20 @@ def build_report(
 
     by_no = {a["no"]: a for a in evaluation["answers"]}
     diffs = {no: compare(by_no[no]["scores"], retries[no]["scores"]) for no in sorted(retries)}
-    lines += ["", f"### 재도전 전 → 후 (0~{ANSWER_MAX})", ""]
-    if not diffs:
+    # 기록이 없으면(옛 호출) 반영된 재도전만 기록으로 본다
+    history = retry_history if retry_history is not None else {no: [r] for no, r in retries.items()}
+    fails = {no: failed_retries(by_no[no]["score"], attempts) for no, attempts in history.items() if attempts}
+    lines += ["", f"### 재도전 전 → 후 (0~{ANSWER_MAX}) · 최고 점수 반영", ""]
+    if not fails:
         lines.append("재도전 기록 없음")
     else:
-        lines += ["| 질문 | 전 | 후 | 차이 |", "| --- | --- | --- | --- |"]
-        for no, diff in diffs.items():
+        lines += ["| 질문 | 전 | 후 (반영) | 차이 | 재도전 | 반영 안 된 재도전 |", "| --- | --- | --- | --- | --- | --- |"]
+        for no in sorted(fails):
+            before = by_no[no]["score"]
+            after = retries[no]["score"] if no in retries else before
             lines.append(
-                f"| {no}. {_cell(questions[no - 1]['question'])} | {diff['before']} | {diff['after']} | {diff['diff']:+d} |"
+                f"| {no}. {_cell(questions[no - 1]['question'])} | {before} | {after} | {after - before:+d} "
+                f"| {len(history[no])}번 | {len(fails[no])}번 |"
             )
 
     totals = total_scores(evaluation, retries)
@@ -909,7 +1221,7 @@ def build_report(
         f"- 최신 종합 (재도전 반영): {totals['latest']} ({totals['diff']:+d})",
         f"- 모의면접 판정: **{result['label']}** "
         f"(합격: 최신 종합 {PASS_TOTAL} 이상 · 위원 평균 {PASS_PANEL:.1f} 이상 / "
-        f"합격 후보: 최신 종합 {PASS_TOTAL} 이상 · 위원 평균 {CANDIDATE_PANEL:.1f} 이상)",
+        f"합격 후보: 최신 종합 {CANDIDATE_TOTAL} 이상 · 위원 평균 {CANDIDATE_PANEL:.1f} 이상)",
         "- 이 판정은 AI 모의면접 학습 지표이며 실제 채용 결과와 무관해요.",
     ]
 
@@ -926,7 +1238,7 @@ def build_report(
                 f"- 최신 종합: {prev['total_before']} → {prev['total_after']} ({prev['total_after'] - prev['total_before']:+d})"
             )
         if prev["criteria_changed"]:
-            lines.append("- ⚠️ 지난 회차와 평가 기준이 달라서 점수 비교가 정확하지 않을 수 있어요.")
+            lines.append("- **주의:** 지난 회차와 평가 기준이 달라서 점수 비교가 정확하지 않을 수 있어요.")
         if prev["rows"]:
             lines += ["", "| 질문 | 지난 | 이번 | 차이 |", "| --- | --- | --- | --- |"]
             lines += [f"| {_cell(r['질문'])} | {r['지난']} | {r['이번']} | {r['차이']:+d} |" for r in prev["rows"]]
@@ -947,15 +1259,25 @@ def build_report(
             else:
                 lines += [f"*면접관:* {m['content']}", ""]
         lines += [f"**AI 의견 · 가장 약한 점:** {a['weak']}", ""]
-        if a["needs_rewrite"]:
-            lines += ["**AI 의견 · 고친 답**", ""] + _quote(a["rewrite"]) + [""]
-            if a["check"]:
-                lines += ["**사람이 확인할 것**", ""] + [f"- {fact}" for fact in a["check"]] + [""]
+        example = questions[no - 1].get("example", "")
+        if a["score"] < ANSWER_MAX and example:
+            lines += ["**만점 예시 답안** (가상 지원자 · 질문 은행에 미리 적어 둔 예시라 내 경험 · 숫자와 무관해요)", ""]
+            lines += _quote(example) + [""]
         if no in retries:
             diff = diffs[no]
-            lines += [f"**재도전한 답** ({diff['before']} → {diff['after']}점, {diff['diff']:+d})", ""]
+            lines += [f"**재도전한 답 · 최고 점수 반영** ({diff['before']} → {diff['after']}점, {diff['diff']:+d})", ""]
             lines += _quote(retries[no]["answer"])
             lines += ["", f"**AI 의견 · 재도전 답의 약한 점:** {retries[no]['weak']}", ""]
+        elif fails.get(no):
+            lines += [f"재도전 {len(fails[no])}번 모두 처음 점수({a['score']}점)보다 높지 않아서 처음 점수를 반영했어요.", ""]
+        if fails.get(no):
+            # 접기: GitHub · VS Code 미리보기 등에서 눌러 펼친다. 안쪽 마크다운이 보이도록 앞뒤에 빈 줄을 둔다.
+            lines += ["<details>", f"<summary>반영 안 된 재도전 {len(fails[no])}번 보기</summary>", ""]
+            for n, r in fails[no]:
+                lines += [f"**{n}번째 재도전** ({a['score']} → {r['score']}점, {r['score'] - a['score']:+d})", ""]
+                lines += _quote(r["answer"])
+                lines += ["", f"**AI 의견 · 약한 점:** {r['weak']}", ""]
+            lines += ["</details>", ""]
 
     # ── 위원회 의견 ──
     lines += ["## 3. 위원회 의견 (AI 의견)", ""]
@@ -985,7 +1307,8 @@ def build_report(
     if precheck_items:
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
-    lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day))]
+    session = session_data(messages, evaluation, retries, retry_counts, last_suggest, last_question, understanding, history)
+    lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day, session))]
     return "\n".join(lines) + "\n"
 
 

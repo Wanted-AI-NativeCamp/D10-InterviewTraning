@@ -1,0 +1,62 @@
+# 몽타주(Montage) 디자인 시스템 — 원티드랩, MIT 라이선스
+# 출처: https://github.com/wanteddev/montage-web (packages/theme/src/theme/atomic · semantic)
+# 바탕 · 글자 · 테두리 · 상태 색 · 글꼴 · 모서리는 몽타주 값 그대로, 이름 옆 괄호는 팔레트 번호.
+# 강조색만 몽타주 파랑 대신 '채도 높은 진 네이비' (서비스 요청).
+# 글꼴: Pretendard (SIL OFL 1.1) — https://github.com/orioncactus/pretendard
+
+[theme]
+font = "Pretendard:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.min.css, sans-serif"
+headingFont = "Pretendard:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.min.css, sans-serif"
+headingFontWeights = [700, 700, 600, 600, 600, 600]  # H1 · H2 700, H3 이하 600
+baseRadius = "8px"      # radius md
+buttonRadius = "10px"   # 버튼 medium
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#10256B"              # 진 네이비 (H226 S74% L24%) · 흰 글자 대비 14.0
+backgroundColor = "#FFFFFF"           # common 100
+secondaryBackgroundColor = "#F7F7F8"  # coolNeutral 99
+textColor = "#171719"                 # coolNeutral 10
+linkColor = "#10256B"
+borderColor = "#E1E2E4"               # coolNeutral 96
+blueColor = "#10256B"                 # 안내 상자도 진 네이비 계열로
+blueBackgroundColor = "#E8EBF5"
+blueTextColor = "#10256B"
+greenColor = "#00BF40"                # green 50
+greenBackgroundColor = "#D9FFE6"      # green 95
+greenTextColor = "#006E25"            # green 30
+orangeColor = "#FF9200"               # orange 50
+orangeBackgroundColor = "#FEF4E6"     # orange 95
+orangeTextColor = "#9C5800"           # orange 30
+redColor = "#FF4242"                  # red 50
+redBackgroundColor = "#FEECEC"        # red 95
+redTextColor = "#B00C0C"              # red 30
+grayColor = "#70737C"                 # coolNeutral 50
+grayBackgroundColor = "#F4F4F5"       # coolNeutral 98
+grayTextColor = "#46474C"             # coolNeutral 30
+
+[theme.dark]
+primaryColor = "#4263D6"              # 진 네이비는 어두운 바탕에서 안 보여서 같은 계열을 밝힘 · 흰 글자 5.3 · 바탕 대비 3.2
+backgroundColor = "#1B1C1E"           # coolNeutral 15
+secondaryBackgroundColor = "#212225"  # coolNeutral 17
+textColor = "#F7F7F8"                 # coolNeutral 99
+linkColor = "#9DB0F0"
+borderColor = "#37383C"               # coolNeutral 25
+blueColor = "#7F96E6"
+blueBackgroundColor = "#1E2440"
+blueTextColor = "#B9C6F2"
+greenColor = "#1ED45A"                # green 60
+greenBackgroundColor = "#1C3928"
+greenTextColor = "#49E57D"            # green 70
+orangeColor = "#FFA938"               # orange 60
+orangeBackgroundColor = "#403322"
+orangeTextColor = "#FFC06E"           # orange 70
+redColor = "#FF6363"                  # red 60
+redBackgroundColor = "#3F2729"
+redTextColor = "#FF8C8C"              # red 70
+grayColor = "#878A93"                 # coolNeutral 60
+grayBackgroundColor = "#292A2D"       # coolNeutral 20
+grayTextColor = "#C2C4C8"             # coolNeutral 90
+
+[theme.dark.sidebar]
+backgroundColor = "#0F0F10"           # coolNeutral 5
