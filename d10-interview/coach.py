@@ -88,7 +88,17 @@ def load_questions(path: Path = QUESTIONS_PATH) -> pd.DataFrame:
     if "만점 예시" not in df.columns:  # 만점 예시 칸이 생기기 전 질문 은행
         df["만점 예시"] = ""
     df["만점 예시"] = df["만점 예시"].fillna("")
+    if "회사 키워드" not in df.columns:  # 회사 키워드 칸이 생기기 전 질문 은행
+        df["회사 키워드"] = ""
+    df["회사 키워드"] = df["회사 키워드"].fillna("")
     return df
+
+
+def fits_company(keywords: str, company_text: str) -> bool:
+    """질문의 '회사 키워드'(/ 로 나눔)가 비어 있으면 어느 회사에나 맞는 질문, 있으면 회사 이름 · 설명에 하나라도 들어 있을 때만.
+    (예: 복약 알림 질문은 약 · 복약을 다루는 회사에서만 나온다)"""
+    words = [w.strip() for w in str(keywords).split("/") if w.strip()]
+    return not words or any(w in company_text for w in words)
 
 
 def question_row(row) -> dict:
@@ -118,18 +128,19 @@ def past_answer(report: dict, index: int) -> str:
 
 
 def question_history(reports: list[dict]) -> dict[str, list[dict]]:
-    """지난 회차 리포트에서 질문 글마다 나온 회차 기록: {질문 글: [{round, answer, score}, ...]} (회차 오름차순).
+    """지난 회차 리포트에서 질문 글마다 나온 회차 기록: {질문 글: [{round, field, answer, score}, ...]} (회차 오름차순).
     같은 회차 리포트가 여러 개면 (같은 회차 이어 하기) 나중 것 하나만 쓴다."""
     history: dict[str, dict[int, dict]] = {}
     for report in reports:
         round_no = report.get("round", 1)
         for i, text in enumerate(report.get("questions") or []):
-            history.setdefault(text, {})[round_no] = {"round": round_no, **past_result(report, i)}
+            history.setdefault(text, {})[round_no] = {"round": round_no, "field": field_of(report.get("profile") or {}),
+                                                      **past_result(report, i)}
     return {text: [rows[r] for r in sorted(rows)] for text, rows in history.items()}
 
 
 def practice_questions(reports: list[dict], current: list[str], bank: pd.DataFrame, job: str,
-                       field: str = DEFAULT_FIELD) -> list[dict]:
+                       field: str = DEFAULT_FIELD, hidden: set | None = None) -> list[dict]:
     """암기 탭 '다른 질문': 이번 회차 질문이 아닌 질문 (연습만 · 점수에는 들어가지 않는다).
     지난 회차 질문(최근 회차 먼저, 그 회차의 최신 답) → 질문 은행의 나머지 질문(내 답 없음) 순서.
     id 는 질문 글로 만든 짧은 값이라 목록 순서가 바뀌어도 연습 기록이 그 질문에 남는다."""
@@ -144,13 +155,14 @@ def practice_questions(reports: list[dict], current: list[str], bank: pd.DataFra
         picked.append({
             "id": practice_id(text), "question": text,
             "point": row["point"] if row else "", "example": row["example"] if row else "", "past": past,
+            "field": row["field"] if row else DEFAULT_FIELD,
             "saved": saved.get(text),
         })
 
     rows = {r["질문"]: question_row(r) for _, r in bank[bank["직군"].isin(["공통", job])].iterrows()}
     for report in sorted(reports, key=lambda r: r.get("round", 1), reverse=True):
         for i, text in enumerate(report.get("questions") or []):
-            answer = past_answer(report, i)
+            answer = "" if (text, report.get("round", 1)) in (hidden or set()) else past_answer(report, i)
             add(text, rows.get(text), {"round": report.get("round", 1), "answer": answer} if answer else None)
     for text in saved:  # 연습 대본만 있는 질문 (예: 다른 분야로 바꾸기 전에 연습한 질문)
         if text not in rows or rows[text]["field"] in (field, DEFAULT_FIELD):
@@ -161,14 +173,72 @@ def practice_questions(reports: list[dict], current: list[str], bank: pd.DataFra
     return picked
 
 
+def round_overview(reports: list[dict]) -> dict[int, dict]:
+    """지난 회차 리포트마다 {round, field, total}: 최신 종합(옛 리포트는 처음 점수 합). 같은 회차면 나중 리포트."""
+    rounds = {}
+    for report in reports:
+        total = report.get("total_latest")
+        if not isinstance(total, int):
+            total = sum(report.get("scores") or [])
+        round_no = report.get("round", 1)
+        rounds[round_no] = {"round": round_no, "field": field_of(report.get("profile") or {}), "total": total}
+    return rounds
+
+
+def question_coverage(df: pd.DataFrame, job: str, asked: set[str], fields: list[str]) -> list[dict]:
+    """질문 은행 대비 진행: 분야마다 {field, asked, total} — 이 직군(공통 직군 포함) 질문 중 지금까지 나온 질문 수.
+    회사 키워드가 붙은 질문도 은행에 있는 질문이라 total 에 넣는다."""
+    bank = df[df["직군"].isin(["공통", job])]
+    out = []
+    for f in fields:
+        texts = set(bank[bank["분야"] == f]["질문"])
+        if texts:
+            out.append({"field": f, "asked": len(texts & asked), "total": len(texts)})
+    return out
+
+
+def best_by_kind(rows: list[dict]) -> dict:
+    """공통 · 분야 면접의 최고 최신 종합 (없으면 None) · 분야별 최고."""
+    common = [r["total"] for r in rows if r["field"] == DEFAULT_FIELD]
+    by_field: dict[str, int] = {}
+    for r in rows:
+        if r["field"] != DEFAULT_FIELD:
+            by_field[r["field"]] = max(by_field.get(r["field"], 0), r["total"])
+    return {"common": max(common) if common else None, "field": max(by_field.values()) if by_field else None,
+            "by_field": by_field}
+
+
+def overview_advice(best: dict) -> list[tuple[str, str]]:
+    """종합 점검 안내 (고정 문장): 둘 다 합격선을 넘도록 비어 있거나 모자란 쪽을 권한다."""
+    out = []
+    if best["common"] is None:
+        out.append(("info", "공통 면접 기록이 없어요. 분야를 '공통' 으로 한 번 진행해 어느 회사에서나 나오는 일반 역량도 점검해 보세요."))
+    elif best["common"] < PASS_TOTAL:
+        out.append(("warning", f"공통 면접 최고 {best['common']}점 · 합격선까지 {PASS_TOTAL - best['common']}점 남았어요. "
+                               "자기소개 · 협업 같은 일반 질문을 재도전과 암기로 다듬어 보세요."))
+    if best["field"] is None:
+        out.append(("info", "분야 면접 기록이 없어요. 다음 회차는 지원할 회사의 분야를 골라 그 분야만의 특수 질문에 대비해 보세요."))
+    elif best["field"] < PASS_TOTAL:
+        out.append(("warning", f"분야 면접 최고 {best['field']}점 · 합격선까지 {PASS_TOTAL - best['field']}점 남았어요. "
+                               "분야 질문은 회사 · 서비스 맥락을 넣어 답하면 점수가 잘 올라요."))
+    if not out:
+        out.append(("success", f"공통 · 분야 면접 모두 합격선({PASS_TOTAL}점)을 넘었어요. 암기와 말하기 연습으로 실전 감각을 유지하세요."))
+    return out
+
+
 def practice_id(text: str) -> str:
     """'다른 질문' 의 짧은 id (질문 글로 만든다: 목록 순서가 바뀌어도 그 질문의 연습 기록이 남는다)."""
     return "x" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
 
 
-def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD) -> list[dict]:
+def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD, company_text: str = "",
+                   avoid: set[str] | None = None) -> list[dict]:
     """자기소개 1 + 공통 1 + 직무 1 + 경험 1 + 상황 1 = 5개를 이 순서로 무작위로 고른다.
-    자리마다 고른 분야의 질문이 있으면 그중에서, 없으면 분야 공통 질문에서 고른다."""
+    자리마다 고른 분야의 질문이 있으면 그중에서, 없으면 분야 공통 질문에서 고른다.
+    company_text(회사 이름 · 설명)에 맞지 않는 질문(회사 키워드가 하나도 없는 질문)은 빼고 고른다.
+    avoid(지난 회차에 나온 질문 글)를 주면 안 나온 질문부터: 고른 분야 → 분야 공통 → (모두 나왔으면) 나온 질문 다시."""
+    avoid = avoid or set()
+    df = df[[fits_company(k, company_text) for k in df["회사 키워드"]]] if "회사 키워드" in df.columns else df
     common = df[df["직군"] == "공통"]
     is_intro = common["질문"].str.contains("자기소개")
     mine = df[df["직군"] == job]
@@ -183,12 +253,54 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD) -> li
     picked = []
     for pool in pools:
         in_field = pool[pool["분야"] == field] if field != DEFAULT_FIELD else pool.iloc[0:0]
-        pool = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
-        if pool.empty:
+        base = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
+        if base.empty:
             raise ValueError(f"'{job}' 직군 질문이 질문 은행에 부족해요.")
-        picked.append(question_row(pool.sample(1).iloc[0]))
+        tiers = [base, pool[pool["분야"] == DEFAULT_FIELD]]
+        fresh = [t[~t["질문"].isin(avoid)] for t in tiers]
+        choice = next((t for t in fresh if not t.empty), base)  # 안 나온 질문이 없으면 나온 질문 다시
+        picked.append(question_row(choice.sample(1).iloc[0]))
     assert len(picked) == TOTAL_QUESTIONS
     return picked
+
+
+QUESTION_MODES = {
+    "same": "같은 질문으로 다시 (성장 비교)",
+    "mix": "섞어서 (지난 질문 2개 + 새 질문)",
+    "new": "새 질문으로 (안 나온 질문 먼저)",
+}
+MIX_KEEP = 2  # '섞어서' 에서 지난 회차 질문을 몇 개 남기나
+
+
+def plan_questions(df: pd.DataFrame, job: str, field: str, company_text: str, mode: str,
+                   previous: list[str] | None, asked: set[str], rng=None) -> tuple[list[dict], str | None]:
+    """회차 질문 정하기 → (질문 5개, 화면 안내 한 줄 또는 None).
+    same: 지난 회차 질문 그대로 (질문 은행에 없는 질문이 있으면 새 질문) · mix: 지난 질문 MIX_KEEP 개 + 새 질문 ·
+    new: 지금까지 나온 질문(asked)을 피해서. 새 질문이 모자라 나온 질문을 다시 쓰면 몇 개인지 알려 준다."""
+    import random
+    rng = rng or random
+    if mode == "same" and previous:
+        matched = match_questions(df, job, previous)
+        if matched:
+            return matched, None
+        questions = pick_questions(df, job, field, company_text, asked)
+        return questions, "지난 질문 중 질문 은행에 없는 질문이 있어서 새 질문으로 시작했어요."
+    questions = pick_questions(df, job, field, company_text, asked)
+    note = None
+    if mode == "mix" and previous:
+        bank = df[df["직군"].isin(["공통", job])]
+        # 자기소개(첫 자리)는 매번 같은 질문이라 빼고, 나머지 자리에서 지난 질문 MIX_KEEP 개를 남긴다
+        slots = [i for i, text in enumerate(previous[:TOTAL_QUESTIONS]) if i > 0 and not bank[bank["질문"] == text].empty]
+        for i in rng.sample(slots, min(MIX_KEEP, len(slots))):
+            questions[i] = question_row(bank[bank["질문"] == previous[i]].iloc[0])
+        kept = {previous[i] for i in slots} & {q["question"] for q in questions}
+        repeats = sum(1 for q in questions[1:] if q["question"] in asked and q["question"] not in kept)
+    else:
+        repeats = sum(1 for q in questions[1:] if q["question"] in asked)  # 자기소개(첫 자리)는 매번 같은 질문이라 세지 않는다
+    if repeats:
+        note = (f"질문 은행에서 아직 안 나온 질문이 모자라, 지난 회차에 나온 질문 {repeats}개를 다시 넣었어요. "
+                "질문 은행에 질문을 더하면 새 질문이 늘어나요.")
+    return questions, note
 
 
 def field_of(profile: dict) -> str:
@@ -392,6 +504,12 @@ def criteria_version() -> str:
         ensure_ascii=False, sort_keys=True,
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def persona_lines(job: str) -> list[str]:
+    """시작 화면 배너용 면접관 소개: 페르소나 글(prompts.py)을 문장마다 나눈다. 글은 바꾸지 않고 '(역할)' 표시만 뺀다."""
+    persona = PERSONAS.get(job, "").replace("(역할)", "").strip()
+    return [s.strip().rstrip(".").rstrip() + "." for s in re.split(r"(?<=[.])\s+", persona) if s.strip()]
 
 
 def persona_summary(job: str) -> str:
@@ -926,6 +1044,7 @@ def session_data(
     clue_set: list[dict] | None = None,
     clue_round: int = 1,
     practice: list[dict] | None = None,
+    past_hidden: list[dict] | None = None,
 ) -> dict:
     """'면접 없이 이어 하기' 용: 이 회차의 대화 · 평가 · 재도전(반영된 것 · 모든 기록) · 마지막 질문을 그대로 남긴다.
     practice: 연습 대본 [{question, script, round}] — 지난 회차 것까지 이어 붙인 목록 (merge_practice).
@@ -965,10 +1084,24 @@ def session_data(
         "practice": [
             {"question": p["question"], "script": p["script"], "round": p["round"]} for p in (practice or [])
         ][:MAX_PRACTICE],
+        # 사용자가 지운 지난 회차 답 [{question, round}] — 지난 회차 것까지 이어 붙인 목록 (리포트 파일 자체는 바꾸지 않는다)
+        "past_hidden": [{"question": h["question"], "round": h["round"]} for h in (past_hidden or [])][:MAX_PAST_HIDDEN],
     }
 
 
 MAX_PRACTICE = 40  # 리포트에 남기는 연습 대본 수 (질문 은행 한 분야 · 직군보다 넉넉히)
+MAX_PAST_HIDDEN = 100  # 리포트에 남기는 '지운 지난 답' 수
+
+
+def saved_hidden(reports: list[dict]) -> set[tuple[str, int]]:
+    """불러온 리포트들에 남은 '지운 지난 답' {(질문 글, 회차)}. 모양이 다른 칸은 건너뛴다 (기능 전 리포트에는 없다)."""
+    hidden = set()
+    for report in reports:
+        items = (report.get("session") or {}).get("past_hidden")
+        for h in items if isinstance(items, list) else []:
+            if isinstance(h, dict) and isinstance(h.get("question"), str) and isinstance(h.get("round"), int):
+                hidden.add((h["question"].strip(), h["round"]))
+    return hidden
 
 
 def saved_practice(reports: list[dict]) -> dict[str, dict]:
@@ -1257,28 +1390,47 @@ def clue_status(evaluation: dict | None, retries: dict, retry_counts: dict,
     return {"round": clue_round, "total": len(rows), "done": sum(r["retried"] for r in rows), "rows": rows}
 
 
-STEP_NAMES = ["면접", "평가", "재도전", "최종 결과", "암기", "점검하기", "리포트"]  # 탭 6개 순서 + 리포트 버튼
+DONE_RATIO = (2, 3)  # 개수로 세는 하위 항목은 전체의 2/3 이상이면 완료
+
+
+def enough(n: int, total: int) -> bool:
+    """n/total 이 DONE_RATIO 이상인가 (total 0 이면 할 것이 없으니 완료)."""
+    num, den = DONE_RATIO
+    return total == 0 or n * den >= total * num
+
+
+def need_count(total: int) -> int:
+    """완료에 필요한 개수 (2/3 올림)."""
+    num, den = DONE_RATIO
+    return -(-total * num // den)
+
+
+STEP_NAMES = ["면접", "평가", "재도전", "모의 결과", "점검하기", "암기", "리포트"]  # 탭 6개 순서 + 리포트 버튼
 
 
 def report_checklist(
     messages: list[dict], evaluation: dict | None, clues: dict | None, verdict_open: bool, memo: dict | None,
     last_suggest: list | None, last_question: dict | None,
     precheck_items: list[dict] | None, precheck: dict | None, report_done: bool,
+    retries: dict | None = None, retry_history: dict | None = None,
 ) -> list[dict]:
     """단계 체크리스트: 탭 7개와 같은 순서 · 같은 이름. 위쪽 진행 막대와 리포트가 같은 목록을 쓴다 (앱이 자동 표시).
-    하위 항목이 있는 단계(재도전 · 암기 · 점검하기)는 sub 에 나눠 담는다. optional: 안 해도 되는 단계.
-    clues = clue_status() · memo = 암기 기록 요약 {speak, edited, checked}."""
+    하위 항목이 있는 단계(재도전 · 점검하기 · 암기)는 sub 에 나눠 담는다. optional: 안 해도 되는 단계.
+    clues = clue_status() · memo = 암기 기록 요약 {speak, edited, checked, other} · retries = 반영된 재도전 ·
+    retry_history = 모든 재도전 기록 (실마리 밖에서 한 재도전 · 암기 탭 재도전 검토도 센다)."""
     answered = sum(bool(answer_text(messages, i).strip()) for i in range(TOTAL_QUESTIONS))
 
     # 재도전: 지금 실마리 회차를 모두 재도전하면 완료. 실마리마다 하위 항목
+    attempts = sum(len(v) for v in (retry_history or {}).values())
+    tried = f" · 재도전 총 {attempts}번" if attempts else ""
     if not evaluation or clues is None:
         retry = {"done": False, "detail": "평가 뒤에 열려요", "sub": []}
     elif not clues["total"]:  # 모두 만점이거나 재도전 기회를 다 씀
-        retry = {"done": True, "detail": "남은 실마리 없음", "sub": []}
+        retry = {"done": True, "detail": "남은 실마리 없음" + tried, "sub": []}
     else:
         retry = {
             "done": clues["done"] == clues["total"],
-            "detail": f"역전의 실마리 {clues['round']}회차 · 완료 {clues['done']}/{clues['total']}",
+            "detail": f"역전의 실마리 {clues['round']}회차 · 완료 {clues['done']}/{clues['total']}{tried}",
             "sub": [
                 {"item": f"질문 {r['no']}", "done": r["retried"],
                  "detail": f"{r['before']} → {r['after']}점" if r["retried"] else "아직 재도전 전"}
@@ -1286,29 +1438,48 @@ def report_checklist(
             ],
         }
 
-    memo = {"speak": 0, "edited": 0, "checked": 0, **(memo or {})}
+    memo = {"speak": 0, "spoken": 0, "edited": 0, "checked": 0, "other": 0, "other_total": 0, **(memo or {})}
+    q_total = TOTAL_QUESTIONS
+
+    def ratio(n: int, total: int, unit: str = "개") -> str:
+        return f"{n}/{total}{unit} · {need_count(total)}{unit} 이상이면 완료"
+    # 평가 · 모의 결과 줄: 점수 · 판정 (앱이 계산한 값)
+    if evaluation:
+        totals = total_scores(evaluation, retries or {})
+        eval_detail = f"위원 평균 {evaluation['panel_average']:.1f} · 최초 종합 {totals['first']}점"
+        verdict_detail = (f"{verdict(totals, evaluation['panel_average'])['label']} · 최신 종합 {totals['latest']}점"
+                          if verdict_open else "")
+    else:
+        eval_detail = verdict_detail = ""
     found = sum(1 for it in (precheck_items or []) if (precheck or {}).get(it["item"], {}).get("found"))
     total_items = len(precheck_items or [])
     rows = [
         {"done": answered == TOTAL_QUESTIONS, "detail": f"답변 {answered}/{TOTAL_QUESTIONS}", "optional": False, "sub": []},
-        {"done": bool(evaluation), "detail": "위원 4명" if evaluation else "", "optional": False, "sub": []},
+        {"done": bool(evaluation), "detail": eval_detail, "optional": False, "sub": []},
         {**retry, "optional": True},
-        {"done": bool(verdict_open), "detail": "", "optional": False, "sub": []},
-        {"done": memo["speak"] > 0 or memo["checked"] > 0, "detail": "", "optional": True, "sub": [
-            {"item": "대본 고치기", "done": memo["edited"] > 0,
-             "detail": f"고친 질문 {memo['edited']}개" if memo["edited"] else ""},
-            {"item": "텍스트 연습", "done": memo["checked"] > 0,
-             "detail": f"실전 시뮬레이션 {memo['checked']}개 질문" if memo["checked"] else ""},
-            {"item": "말하기 연습", "done": memo["speak"] > 0, "detail": f"{memo['speak']}번" if memo["speak"] else ""},
-        ]},
-        {"done": bool(last_suggest or last_question), "detail": "", "optional": True, "sub": [
-            {"item": "사전 정보 탐색", "done": total_items > 0 and found == total_items,
-             "detail": f"찾음 {found}/{total_items}" if total_items else ""},
+        {"done": bool(verdict_open), "detail": verdict_detail, "optional": False, "sub": []},
+        # 점검하기: 하위 항목 하나라도 하면 완료 (사전 정보 탐색만 해도 된다)
+        {"done": bool(last_suggest or last_question) or found > 0, "detail": "", "optional": True, "sub": [
+            {"item": "사전 정보 탐색", "done": total_items > 0 and enough(found, total_items),
+             "detail": f"찾음 {ratio(found, total_items)}" if total_items else ""},
             {"item": "추천 질문 받기", "done": bool(last_suggest), "detail": ""},
             {"item": "내 질문 다듬기", "done": bool(last_question), "detail": ""},
         ]},
+        {"done": memo["speak"] > 0 or memo["checked"] > 0 or memo["other"] > 0, "detail": "", "optional": True, "sub": [
+            {"item": "대본 고치기", "done": enough(memo["edited"], q_total), "detail": f"고친 질문 {ratio(memo['edited'], q_total)}"},
+            {"item": "텍스트 연습", "done": enough(memo["checked"], q_total),
+             "detail": f"실전 시뮬레이션 {ratio(memo['checked'], q_total)}"},
+            {"item": "말하기 연습", "done": enough(memo["spoken"], q_total),
+             "detail": f"말해 본 질문 {ratio(memo['spoken'], q_total)}" + (f" · 기록 {memo['speak']}번" if memo["speak"] else "")},
+            {"item": "다른 질문 연습", "done": enough(memo["other"], memo["other_total"]),
+             "detail": ratio(memo["other"], memo["other_total"], "개 질문") if memo["other_total"] else "연습할 다른 질문 없음"},
+        ]},
         {"done": bool(report_done), "detail": "면접리포트.md 받기", "optional": False, "sub": []},
     ]
+    # 하위 항목이 있는 단계는 하위 항목을 모두 해야 완료 (하나만 해도 완료로 치면 진행도가 너무 후하다)
+    for row in rows:
+        if row["sub"]:
+            row["done"] = all(s["done"] for s in row["sub"])
     # 리포트는 탭이 아니라 위쪽 버튼이라 번호를 붙이지 않는다 (step None)
     return [{"step": i + 1 if i < len(STEP_NAMES) - 1 else None, "item": name, **row}
             for i, (name, row) in enumerate(zip(STEP_NAMES, rows))]
@@ -1380,6 +1551,7 @@ def build_report(
     memo: dict | None = None,
     verdict_open: bool = False,
     practice: list[dict] | None = None,
+    past_hidden: list[dict] | None = None,
 ) -> str:
     """면접리포트.md. 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
@@ -1404,6 +1576,7 @@ def build_report(
         *checklist_report_lines(report_checklist(
             messages, evaluation, clue_status(evaluation, retries, retry_counts or {}, clue_set, clue_round),
             verdict_open, memo, last_suggest, last_question, precheck_items, precheck, report_done=True,
+            retries=retries, retry_history=retry_history,
         )),
         "## 1. 점수",
         "",
@@ -1541,7 +1714,7 @@ def build_report(
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
     session = session_data(messages, evaluation, retries, retry_counts, last_suggest, last_question, understanding, history,
-                           clue_set, clue_round, practice)
+                           clue_set, clue_round, practice, past_hidden)
     lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day, session))]
     return "\n".join(lines) + "\n"
 
