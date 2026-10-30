@@ -2,12 +2,17 @@
 # 출처: https://github.com/wanteddev/montage-web (packages/theme/src/theme/atomic · semantic)
 # 바탕 · 글자 · 테두리 · 상태 색 · 글꼴 · 모서리는 몽타주 값 그대로, 이름 옆 괄호는 팔레트 번호.
 # 강조색만 몽타주 파랑 대신 '채도 높은 진 네이비' (서비스 요청).
-# 글꼴: Pretendard (SIL OFL 1.1) — https://github.com/orioncactus/pretendard
+# 글꼴: Wanted Sans (SIL OFL 1.1) — https://github.com/wanteddev/wanted-sans (가변 글꼴, 굵기 400~1000)
+# 당근 느낌을 내려고 Pretendard 에서 바꿈. 당근 전용 서체(Karrot Sans)는 공개 라이선스가 없어 쓰지 않는다.
 
 [theme]
-font = "Pretendard:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.min.css, sans-serif"
-headingFont = "Pretendard:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.min.css, sans-serif"
-headingFontWeights = [700, 700, 600, 600, 600, 600]  # H1 · H2 700, H3 이하 600
+font = "Wanted Sans Variable:https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css"
+headingFont = "Wanted Sans Variable:https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css"
+# 글자 체계: 당근(about.daangn.com) 크기 · 굵기.
+# 줄간격 · 자간 · 좁은 화면 H1 크기는 app.py hover_css 에 있다.
+headingFontSizes = ["42px", "28px", "20px", "18px", "16px", "14px"]
+headingFontWeights = [700, 700, 700, 600, 600, 600]  # H1 ~ H3 700 (당근은 제목을 모두 Bold), H4 이하 600
+baseFontSize = 16
 baseRadius = "8px"      # radius md
 buttonRadius = "10px"   # 버튼 medium
 showWidgetBorder = true

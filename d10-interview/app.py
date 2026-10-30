@@ -1,5 +1,7 @@
 # Streamlit 화면만. 프롬프트는 prompts.py, AI 호출은 llm.py, 계산은 coach.py.
 import html
+import itertools
+import json
 import math
 import os
 import time
@@ -21,12 +23,16 @@ from prompts import (
     LAST_SUGGEST_INPUT,
     LAST_SUGGEST_SCHEMA,
     PANEL_CRITERIA,
+    PERSONA_CARDS,
     PERSONAS,
     RETRY_SCHEMA,
     STRATEGY_SCHEMA,
 )
 
-st.set_page_config(page_title="역전 면접 코칭", page_icon=":material/mic:")
+st.set_page_config(  # 파비콘: assets/favicon.png (원본 fabicon.png 를 256px 로 줄인 것)
+    page_title="역전 면접 코칭",
+    page_icon=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "favicon.png"),
+)
 
 
 def hover_css() -> str:
@@ -38,6 +44,21 @@ def hover_css() -> str:
     dark = getattr(st.context.theme, "type", None) == "dark"
     accent = "#4263D6" if dark else "#10256B"  # config.toml 강조색과 같게
     heading = "#9DB0F0" if dark else "#10256B"
+    # 타이틀 화면 판: 라이트는 화이트 → 아이스 블루, 다크는 어두운 남색 (다크 바탕에 흰 판은 눈부셔서)
+    if dark:
+        title = {"bg": "radial-gradient(ellipse at 50% 30%, #16307F 0%, #0A1030 45%, #05070F 100%)",
+                 "bar": "linear-gradient(90deg, #05070F, #16307F 50%, #05070F)", "border": "transparent",
+                 "text": "#C2C4C8", "caption": "#878A93", "glow": "rgba(66, 99, 214, 0.55)",
+                 "sub_bg": "rgba(255, 255, 255, 0.04)", "sub_border": "rgba(157, 176, 240, 0.55)", "sub_text": "#E8EBF5",
+                 "sub_hover": "rgba(157, 176, 240, 0.14)", "focus": "#9DB0F0",
+                 "head": "#E8EBF5", "haze1": "rgba(66, 99, 214, 0.35)", "haze2": "rgba(157, 176, 240, 0.18)"}
+    else:
+        title = {"bg": "linear-gradient(180deg, #FFFFFF 0%, #EEF6FF 50%, #D6EAFB 100%)",
+                 "bar": "linear-gradient(90deg, #FFFFFF, #E3F0FD 50%, #FFFFFF)", "border": "#D6E4F2",
+                 "text": "#46474C", "caption": "#5A5C63", "glow": "rgba(31, 37, 92, 0.25)",
+                 "sub_bg": "#FFFFFF", "sub_border": "#B9C6F2", "sub_text": "#10256B",
+                 "sub_hover": "#EEF3FF", "focus": "#10256B",
+                 "head": "#10256B", "haze1": "rgba(255, 255, 255, 0.9)", "haze2": "rgba(110, 170, 235, 0.5)"}
     return f"""<style>
 [data-testid="stCode"] .token.important, [data-testid="stCode"] .token.title {{ color: {heading} !important; }}
 [data-testid="stBaseButton-primary"]:hover:not(:disabled),
@@ -55,8 +76,141 @@ def hover_css() -> str:
 .st-key-eval_legend .stMarkdownBadge[style*="color: rgb(185, 198, 242)"],
 .st-key-memo_qcard .stMarkdownBadge[style*="color: rgb(185, 198, 242)"] {{
   background-color: #0B3049 !important; color: #7DD3FC !important; }}
-/* 시작 화면 직군 버튼 아래 면접관 소개 배너 (회색 · config.toml grayBackgroundColor 와 같은 값) */
-.st-key-persona_banner {{ background: {"#292A2D" if dark else "#F4F4F5"}; border-radius: 10px; padding: 14px 18px; gap: 4px; }}
+/* 헤더 아래 간격: Streamlit 기본은 본문 위쪽 여백 96px (헤더 60px + 빈 공간 36px) → 76px (빈 공간 16px).
+   헤더가 본문 위에 떠 있어서 60px 보다 줄이면 맨 위 내용이 헤더에 가려진다 */
+[data-testid="stMainBlockContainer"] {{ padding-top: 76px !important; }}
+/* 글자 체계: 당근(about.daangn.com) 줄간격 · 자간 (크기 · 굵기는 config.toml headingFontSizes · headingFontWeights)
+   H1 42/58 · H2 28/42 · H3 20/28 · 본문 16/24, 제목 자간 -0.6px. 좁은 화면에서 H1 은 30px 로 */
+[data-testid="stHeading"] h1, [data-testid="stMarkdownContainer"] h1 {{ line-height: 1.38 !important; letter-spacing: -0.6px; }}
+[data-testid="stHeading"] h2, [data-testid="stMarkdownContainer"] h2 {{ line-height: 1.5 !important; letter-spacing: -0.6px; }}
+[data-testid="stHeading"] h3, [data-testid="stMarkdownContainer"] h3 {{ line-height: 1.4 !important; letter-spacing: -0.4px; }}
+[data-testid="stMarkdownContainer"] p {{ line-height: 1.5; }}
+@media (max-width: 640px) {{ [data-testid="stHeading"] h1 {{ font-size: 30px !important; }} }}
+/* 타이틀 화면: 게임 첫 화면처럼 로고 + 메뉴 (색은 위 title 값 · 라이트/다크) */
+.st-key-title_screen {{ background: {title["bg"]}; border: 1px solid {title["border"]};
+  border-radius: 16px; padding: 56px 24px 40px; min-height: 72vh; justify-content: center; align-items: center; gap: 12px;
+  position: relative; overflow: hidden; }}
+/* 스플래시 (들어올 때 한 번): 로고는 홈 화면 로고 하나를 그대로 쓰고 움직이지 않는다.
+   로고 아래 칸(title_stage)에 스플래시 문구와 홈 내용(title_body)을 같은 자리에 겹쳐 두어, 칸 높이가 변하지 않으니
+   문구가 홈 내용으로 바뀌어도 로고 위치가 그대로다. 아지랑이는 판 뒤에서만 피어오르다 걷힌다. CSS 만 쓴다.
+   시간: 문구 0.5s~ 떠오름 · 2.5s~ 걷힘 · 아지랑이 3.0s~ 걷힘 · 홈 내용 3.0s~ 나타남 */
+.st-key-title_screen > * {{ position: relative; z-index: 1; }}
+.st-key-title_stage {{ display: grid !important; grid-template-columns: minmax(0, 1fr); width: 100%; }}
+.st-key-title_stage > * {{ grid-area: 1 / 1; min-width: 0; width: 100% !important; justify-self: stretch; }}
+.st-key-title_body, .st-key-splash_text {{ align-items: center; width: 100% !important; gap: 12px; }}
+.st-key-title_body > *, .st-key-splash_text > * {{ max-width: 100%; }}
+.st-key-splash_text {{ align-self: start; gap: 4px; padding-top: 4px; animation: content-out 0.5s ease-in 2.5s forwards; }}
+.st-key-title_stage:has(.st-key-splash_text) .st-key-title_body {{ animation: body-in 0.6s ease-out 3.0s both; }}
+.st-key-title_screen:has(.st-key-splash_text)::before, .st-key-title_screen:has(.st-key-splash_text)::after {{
+  content: ""; position: absolute; left: -20%; right: -20%; bottom: -35%; height: 90%;
+  background: radial-gradient(ellipse 30% 45% at 25% 70%, {title["haze1"]}, transparent 70%),
+              radial-gradient(ellipse 25% 40% at 72% 75%, {title["haze2"]}, transparent 70%),
+              radial-gradient(ellipse 35% 35% at 50% 88%, {title["haze1"]}, transparent 70%);
+  filter: blur(14px); pointer-events: none; z-index: 0; transform-origin: 50% 100%;
+  animation: haze-rise 3.4s ease-in-out infinite, content-out 0.8s ease-in 3.0s forwards; }}
+.st-key-title_screen:has(.st-key-splash_text)::after {{ animation-duration: 4.2s, 0.8s; animation-delay: -1.7s, 3.0s; }}
+.st-key-splash_head, .st-key-splash_sub {{ align-items: center; }}
+/* 로고: 자리는 그대로 두고 투명도만 0 → 1 로 서서히 (스플래시 때만) */
+.st-key-title_screen:has(.st-key-splash_text) img {{ animation: logo-fade 1s ease-out both; }}
+.st-key-splash_head {{ animation: text-in 0.8s ease-out 0.5s both; }}
+.st-key-splash_sub {{ animation: text-in 0.8s ease-out 0.8s both; }}
+.st-key-title_screen .st-key-splash_head [data-testid="stMarkdownContainer"] p {{
+  font-size: 1.4rem; font-weight: 700; color: {title["head"]} !important; text-align: center; word-break: keep-all; }}
+.st-key-title_screen .st-key-splash_sub [data-testid="stMarkdownContainer"] p {{
+  font-size: 1rem; color: {title["text"]} !important; text-align: center; word-break: keep-all; }}
+@keyframes haze-rise {{
+  0% {{ transform: translateY(35%) scaleX(1) skewX(0deg); opacity: 0; }}
+  30% {{ opacity: 1; }}
+  50% {{ transform: translateY(0) scaleX(1.08) skewX(4deg); }}
+  100% {{ transform: translateY(-55%) scaleX(0.95) skewX(-3deg); opacity: 0; }} }}
+@keyframes logo-fade {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+@keyframes text-in {{ from {{ opacity: 0; transform: translateY(8px); }} to {{ opacity: 1; transform: none; }} }}
+@keyframes content-out {{ to {{ opacity: 0; visibility: hidden; }} }}
+@keyframes body-in {{ from {{ opacity: 0; visibility: hidden; }} to {{ opacity: 1; visibility: visible; }} }}
+/* 움직임 줄이기 설정: 아지랑이 없이 문구만 잠깐 보였다가 바로 홈 내용 */
+@media (prefers-reduced-motion: reduce) {{
+  .st-key-title_screen:has(.st-key-splash_text)::before, .st-key-title_screen:has(.st-key-splash_text)::after {{ display: none; }}
+  .st-key-splash_head, .st-key-splash_sub, .st-key-title_screen:has(.st-key-splash_text) img {{ animation: none; }}
+  .st-key-splash_text {{ animation-duration: 0.01s; animation-delay: 1.8s; }}
+  .st-key-title_stage:has(.st-key-splash_text) .st-key-title_body {{ animation-duration: 0.01s; animation-delay: 1.8s; }} }}
+.st-key-title_screen img {{ display: block; margin: 0 auto 32px; max-width: min(560px, 100%) !important; height: auto; }}
+.st-key-title_screen [data-testid="stMarkdownContainer"] p {{ color: {title["text"]} !important; text-align: center; word-break: keep-all; }}
+.st-key-title_screen [data-testid="stCaptionContainer"], .st-key-title_screen [data-testid="stCaptionContainer"] p {{
+  color: {title["caption"]} !important; text-align: center; word-break: keep-all; }}
+.st-key-title_menu {{ width: min(340px, 100%) !important; align-self: center; gap: 12px; margin: 20px auto 8px; }}
+.st-key-title_screen .st-key-title_menu button [data-testid="stMarkdownContainer"] p {{ color: inherit !important; }}  /* 버튼 글자는 버튼 색 그대로 */
+.st-key-title_menu button {{ min-height: 56px; }}
+.st-key-title_menu button p {{ font-size: 1.05rem !important; font-weight: 600; }}
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-primary"],
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-primary"]:hover:not(:disabled),
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-primary"]:focus-visible {{
+  background-color: #1F255C !important; border-color: {"#7F96E6" if dark else "#1F255C"} !important; color: #FFFFFF !important;
+  box-shadow: 0 0 20px {title["glow"]}; }}
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-primary"]:hover:not(:disabled) {{ background-color: #2B3378 !important; }}
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-secondary"],
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-secondary"]:hover:not(:disabled) {{
+  background-color: {title["sub_bg"]} !important; border-color: {title["sub_border"]} !important; color: {title["sub_text"]} !important; }}
+.st-key-title_screen .st-key-title_menu [data-testid="stBaseButton-secondary"]:hover:not(:disabled) {{ background-color: {title["sub_hover"]} !important; }}
+.st-key-title_menu button:focus-visible {{ outline: 2px solid {title["focus"]} !important; outline-offset: 2px; }}
+/* 새 면접 창 '준비 중' 직군 안내: 기본 안내 상자(네이비) 대신 연한 아이스 블루 단색 (다크는 같은 계열의 어두운 단색) */
+.st-key-job_notice [data-testid="stAlertContainer"] {{ background: {"#16243A" if dark else "#F2F8FE"} !important;
+  border: 1px solid {"#24385A" if dark else "#DCEAF7"}; }}
+.st-key-job_notice [data-testid="stAlertContainer"] p {{ color: {title["text"]} !important; }}
+/* 새 면접 ↔ 이어하기 전환 · 면접관 타입 고르기: 원티드 몽타주 Segmented Control (medium · 높이 40).
+   트랙 fill.normal(coolNeutral 50 의 8% · 다크 22%), 고른 칸 background.elevated + 그림자 small, 글자 label.normal 600,
+   안 고른 칸 label.alternative 500. 트랙 radius 12 · 칸 radius 8 · 안쪽 여백 4 */
+:is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] {{ width: 100%; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] > div {{
+  display: flex !important; width: 100%; gap: 4px; padding: 4px; border-radius: 12px; position: relative;
+  background: {"rgba(112, 115, 124, 0.22)" if dark else "rgba(112, 115, 124, 0.08)"}; }}
+/* 고른 칸 표시는 버튼 바탕이 아니라 트랙 위 '알약' 하나가 옆으로 미끄러진다 (두 칸 · 칸 너비 = 트랙 안쪽 절반 - 간격 반) */
+:is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] > div::before {{
+  content: ""; position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc(50% - 6px); border-radius: 8px;
+  background: {"#37383C" if dark else "#FFFFFF"};
+  box-shadow: 0 1px 2px rgba(23, 23, 23, 0.06), 0 0 1px rgba(23, 23, 23, 0.08);
+  transition: transform 280ms cubic-bezier(0.2, 0, 0, 1); }}
+:is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] > div:has(> :last-child[aria-checked="true"], > :last-child [aria-checked="true"])::before {{
+  transform: translateX(calc(100% + 4px)); }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button {{ position: relative; z-index: 1; flex: 1 1 0 !important; min-height: 40px; border: none !important;
+  border-radius: 8px !important; background: transparent !important; box-shadow: none !important;
+  color: {"#AEB0B6" if dark else "#70737C"} !important;
+  transition: color 200ms ease-out, transform 120ms ease-out; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button p {{ font-weight: 500; transition: font-weight 200ms ease-out; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button:hover:not([aria-checked="true"]) {{ color: {"#F7F7F8" if dark else "#171719"} !important; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button:active {{ transform: scale(0.98); }}  /* 누르는 순간 살짝 눌리는 느낌 */
+:is(.st-key-mode_switch, .st-key-persona_switch) button[aria-checked="true"] {{ color: {"#F7F7F8" if dark else "#171719"} !important; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button[aria-checked="true"] p {{ font-weight: 600; }}
+:is(.st-key-mode_switch, .st-key-persona_switch) button:focus-visible {{ outline: 2px solid {title["focus"]} !important; outline-offset: 1px; }}
+@media (prefers-reduced-motion: reduce) {{
+  :is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] > div::before, :is(.st-key-mode_switch, .st-key-persona_switch) button,
+  :is(.st-key-mode_switch, .st-key-persona_switch) button p {{ transition: none; }}
+  :is(.st-key-mode_switch, .st-key-persona_switch) button:active {{ transform: none; }} }}
+/* 새 면접 · 이어하기 창 위의 작은 로고 띠 (타이틀 판과 같은 색 계열) */
+.st-key-logo_bar {{ background: {title["bar"]}; border: 1px solid {title["border"]}; border-radius: 12px; padding: 10px 16px; align-items: center;
+  position: relative; transition: border-color 150ms ease-out; }}
+/* 띠 전체를 누르면 홈: 투명 버튼을 띠 위에 꽉 채워 겹친다 (키보드 Tab 으로도 갈 수 있고, 포커스면 테두리 표시) */
+.st-key-logo_bar .st-key-logo_home {{ position: absolute !important; inset: 0; margin: 0 !important; z-index: 2; }}
+.st-key-logo_bar .st-key-logo_home, .st-key-logo_bar .st-key-logo_home div,
+.st-key-logo_bar .st-key-logo_home button {{ width: 100% !important; height: 100% !important; max-width: none !important; }}
+.st-key-logo_bar .st-key-logo_home button {{ opacity: 0; cursor: pointer; border-radius: 12px; }}
+.st-key-logo_bar:hover {{ border-color: {"#7F96E6" if dark else "#B9C6F2"}; }}
+.st-key-logo_bar:has(button:focus-visible) {{ outline: 2px solid {title["focus"]}; outline-offset: 2px; }}
+.st-key-logo_bar img {{ display: block; margin: 0 auto; width: 200px !important; max-width: 100%; height: auto; }}
+/* 창 머리: 제목과 '타이틀로' 를 한 줄에, 아래는 구분선 */
+.st-key-start_window > [data-testid="stHorizontalBlock"]:first-child {{ border-bottom: 1px solid var(--st-border-color, rgba(128,128,128,.25)); padding-bottom: 8px; }}
+/* 면접관 소개: 머리줄(persona_head)은 카드 밖, 칸마다 회색 카드(persona_card_줄칸) 2열 (회색 · config.toml grayBackgroundColor 와 같은 값) */
+.st-key-persona_head {{ gap: 2px; }}
+.st-key-persona_cards {{ gap: 12px; }}
+.st-key-persona_cards [data-testid="stHorizontalBlock"] {{ align-items: stretch; }}  /* 같은 줄 두 카드 높이 맞춤 */
+.st-key-persona_cards [data-testid="stColumn"] > div {{ height: 100%; }}
+[class*="st-key-persona_card_"] {{ height: 100%; background: {"#292A2D" if dark else "#F4F4F5"}; border-radius: 12px; padding: 14px 18px 18px; }}
+/* 카드 안: 소제목은 작게, 항목은 본문보다 한 단계 작게 (config.toml grayTextColor) */
+[class*="st-key-persona_card_"] p {{ font-size: 0.8rem; font-weight: 600; color: {"#C2C4C8" if dark else "#46474C"}; margin: 0 0 4px; }}
+[class*="st-key-persona_card_"] ul {{ margin: 0; padding-left: 1.1rem; }}
+[class*="st-key-persona_card_"] li {{ font-size: 0.875rem; line-height: 1.55; margin: 0 0 2px; word-break: keep-all; }}
+[class*="st-key-persona_card_"] li:last-child {{ margin-bottom: 0; }}
+/* Streamlit 은 마크다운 칸 아래에 -16px 를 줘서 마지막 글이 카드 바닥 여백을 파고든다 → 0 */
+[class*="st-key-persona_card_"] [data-testid="stMarkdownContainer"] {{ margin-bottom: 0 !important; }}
 /* 면접 화면 내 답 말풍선: 오른쪽 여백을 16px → 32px (글이 오른쪽 끝에 붙어 보이지 않게) */
 [data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) {{ padding-right: 32px !important; }}
 /* 암기 탭 질문 카드: 좁은 화면에서도 < 질문 > 을 한 줄로 (Streamlit 은 640px 아래에서 칸을 세로로 쌓는다) */
@@ -155,7 +309,7 @@ def reset(job: str | None = None, field: str | None = None):
     지우지 않는다 (상태창에서 회사를 바꿔 가며 쓰고, 정해 둔 태그 기준을 다시 쓰도록)."""
     kept = {key: st.session_state.get(key, default) for key, default in
             (("reports", {}), ("report_groups", []), ("report_group_of", {}),
-             ("report_tags", None), ("report_tag_of", {}))}
+             ("report_tags", None), ("report_tag_of", {}), ("splash_done", False))}
     if kept["report_tags"] is None:
         kept["report_tags"] = [dict(t) for t in DEFAULT_TAGS]
     st.session_state.clear()
@@ -201,7 +355,7 @@ def question_message(index: int) -> dict:
 # '분야 다시 고르기' · '직군 다시 고르기' 는 홈이 고르던 값을 미리 골라 두는 것으로 대신한다
 # (ui-ux-pro-max: Forms · Redundant Entry — 이전에 고른 값을 다시 입력하게 하지 않기).
 NAV_BUTTONS = [
-    (":material/home: 홈으로 돌아가기", "home", "처음 화면으로 가요. 기본 직군 · 새 면접으로 다시 시작해요."),
+    (":material/home: 홈으로 돌아가기", "home", "타이틀 화면으로 가요. 새 면접 · 이어하기를 다시 골라요."),
     (":material/restart_alt: 처음부터 다시", "restart", "같은 분야 · 직군 모드로 새 면접을 시작해요."),
 ]
 
@@ -209,10 +363,11 @@ NAV_BUTTONS = [
 def leave(target: str):
     """상태창 이동. home: 분야 · 직군 고르기 (고르던 값 유지) · restart: 같은 모드로 새 면접."""
     job, field = state.get("job"), state.get("field")
-    if target in ("restart", "back"):  # back: 위쪽 '뒤로' (면접 중 · 끝난 뒤 → 같은 직군 시작 화면)
+    if target in ("restart", "back"):  # back: 위쪽 '뒤로' (면접 중 · 끝난 뒤 → 같은 직군 새 면접 창)
         reset(job, field)
+        state.start_mode = "new"
         return
-    reset()  # 홈: 기본 직군 · 새 면접으로 처음 화면
+    reset()  # 홈: 타이틀 화면 (기본 직군)
 
 
 def job_reports() -> dict:
@@ -268,6 +423,98 @@ MAX_TAG_NAME_CHARS = 10
 MAX_TAG_RULE_CHARS = 60
 NO_TAG = "태그 없음"
 
+# 붙여넣기 글자 수 맞춤: Streamlit 은 max_chars 보다 긴 글을 붙여 넣으면 통째로 무시한다 (아무것도 안 들어가고 안내도 없음).
+# 그래서 넘치면 상한까지만 넣고 화면 아래에 한 줄로 알린다. 칸은 key 앞부분으로 찾는다 (긴 이름부터 맞춰 본다).
+# 스크립트에는 고정 문장과 상한 숫자만 넣는다 — 사용자 글 · AI 출력 · 키는 넣지 않는다.
+# (스크립트 글에 태그 모양 글자가 있으면 Streamlit 정리기가 스크립트를 통째로 지우므로 부등호 '작다' 쪽은 쓰지 않는다)
+PASTE_LIMITS = {
+    "f_experience": coach.MAX_EXPERIENCE_CHARS,
+    "retry_answer_": coach.MAX_ANSWER_CHARS,
+    "memo_try_": coach.MAX_ANSWER_CHARS,
+    "memo_draft_": coach.MAX_ANSWER_CHARS,
+    "last_question_input": coach.MAX_LAST_QUESTION_CHARS,
+    "pre_memo_": coach.MAX_MEMO_CHARS,
+    "new_group": MAX_GROUP_NAME_CHARS,
+    "new_tag_rule": MAX_TAG_RULE_CHARS,
+    "tag_rule_": MAX_TAG_RULE_CHARS,
+    "new_tag": MAX_TAG_NAME_CHARS,
+}
+PASTE_GUARD_JS = """<script>
+(() => {
+  window.__pasteLimits = %s;
+  window.__chatLimit = %d;
+  if (window.__pasteGuard) return;
+  window.__pasteGuard = true;
+  const limitOf = (el) => {
+    if (el.closest('[data-testid="stChatInput"]')) return window.__chatLimit;
+    const box = el.closest('[class*="st-key-"]');
+    if (!box) return 0;
+    const key = [...box.classList].find((c) => c.startsWith("st-key-")).slice(7);
+    const prefix = Object.keys(window.__pasteLimits).sort((a, b) => b.length - a.length).find((p) => key.startsWith(p));
+    return prefix ? window.__pasteLimits[prefix] : 0;
+  };
+  let timer = 0;
+  const note = (text) => {
+    let el = document.getElementById("paste-note");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "paste-note";
+      el.setAttribute("role", "status");
+      el.style.cssText = "position:fixed;left:50%%;bottom:24px;transform:translateX(-50%%);z-index:999999;max-width:calc(100vw - 32px);padding:10px 16px;border-radius:10px;background:#171719;color:#F7F7F8;font-size:14px;line-height:1.5;box-shadow:0 4px 16px rgba(0,0,0,.18);word-break:keep-all;";
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.style.display = "block";
+    clearTimeout(timer);
+    timer = setTimeout(() => { el.style.display = "none"; }, 6000);
+  };
+  document.addEventListener("paste", (e) => {
+    const el = e.target;
+    if (!el || !el.matches || !el.matches("input, textarea")) return;
+    const limit = limitOf(el);
+    if (!limit) return;
+    const text = (e.clipboardData || window.clipboardData).getData("text");
+    const room = limit - (el.value.length - (el.selectionEnd - el.selectionStart));
+    if (room >= text.length) return;
+    e.preventDefault();
+    let part = room > 0 ? text.slice(0, room) : "";
+    const last = part.charCodeAt(part.length - 1);
+    if (last >= 0xD800 && 0xDBFF >= last) part = part.slice(0, -1);  // 이모지 반쪽은 넣지 않는다
+    if (part) document.execCommand("insertText", false, part);
+    note(limit.toLocaleString() + "자까지만 넣었어요. 붙여 넣은 글 중 뒷부분 " + (text.length - part.length).toLocaleString() + "자는 빠졌어요.");
+  }, true);
+})();
+</script>"""
+st.html(PASTE_GUARD_JS % (json.dumps(PASTE_LIMITS), coach.MAX_ANSWER_CHARS), unsafe_allow_javascript=True)
+
+# 시작 화면 지원 정보: 네 칸(이름 · 회사 이름 · 회사 설명 · 내 경험)이 다 찰 때까지 시작 버튼을 비활성화한다.
+# 폼(st.form)은 제출 전 값을 서버로 보내지 않아서 서버가 알 수 없으므로, 브라우저에서 칸을 보고 버튼만 막는다.
+# 빈칸 · 글자 수 확인은 서버(started)에서 그대로 한다 (칸에서 Enter 로 제출하는 경우까지).
+# 스크립트에는 고정 문장과 칸 key 만 넣는다 — 사용자 글 · AI 출력 · 키는 넣지 않는다.
+START_GUARD_JS = """<script>
+(() => {
+  if (window.__startGuard) return;
+  window.__startGuard = true;
+  const keys = ["f_name", "f_company", "f_company_desc", "f_experience"];
+  const fieldOf = (k) => document.querySelector(".st-key-" + k + " input, .st-key-" + k + " textarea");
+  const check = () => {
+    const first = fieldOf(keys[0]);
+    const form = first && first.closest('[data-testid="stForm"]');
+    const btn = form && form.querySelector('[data-testid="stFormSubmitButton"] button');
+    if (!btn) return;
+    const filled = keys.every((k) => { const el = fieldOf(k); return el && el.value.trim().length > 0; });
+    if (btn.disabled === filled) {
+      btn.disabled = !filled;
+      btn.setAttribute("aria-disabled", String(!filled));
+      btn.title = filled ? "" : "필수 항목(이름 · 회사 이름 · 회사 설명 · 내 경험)을 모두 채우면 시작할 수 있어요.";
+    }
+  };
+  document.addEventListener("input", check, true);
+  setInterval(check, 300);
+})();
+</script>"""
+st.html(START_GUARD_JS, unsafe_allow_javascript=True)
+
 
 def tag_rank(fid: str) -> int:
     """상태창에서 태그 순서대로 (1지망 → 2지망 → … → 태그 없음)."""
@@ -315,6 +562,7 @@ def activate_report(fid: str):
     state.active_report = fid
     state.previous = report
     state.start_mode = "resume"
+    state.job = report["profile"]["job"]  # 이어하기 창은 직군을 고르지 않고 리포트의 직군으로 연다
     state.field = report["profile"]["field"]  # 이어 하는 리포트의 분야로 맞춘다 (시작 화면에서 바꿀 수 있다)
     state.start_field = state.field
     for field in ("name", "company", "company_desc", "experience"):
@@ -338,6 +586,7 @@ def resume_without_interview(previous: dict, name, job, company, company_desc, e
     state.profile = {
         "name": name, "field": state.get("field", coach.DEFAULT_FIELD), "job": job,
         "company": company, "company_desc": company_desc, "experience": experience,
+        "persona_type": state.get("persona_type"),  # 면접관 타입 (리포트에는 남기지 않아 리포트로 이어 하면 기본 타입)
     }
     state.questions = questions
     state.round = previous["round"]   # 같은 회차를 이어 간다
@@ -387,6 +636,8 @@ with st.sidebar:
         )
     if state.stage == "pick":
         st.caption("직군을 고르면 시작할 수 있어요.")
+    elif state.stage == "start" and state.get("start_mode") not in ("new", "resume"):
+        st.caption("새 면접을 시작하거나 이전 면접을 이어 해 주세요.")
     elif state.stage == "start":
         st.caption("면접을 시작하면 진행 상황이 보여요.")
     elif state.stage == "briefing":
@@ -530,7 +781,7 @@ with st.sidebar:
                 st.rerun()
 
 
-LEAVE_TEXT = {"home": "홈(직군 고르기)으로 가면", "restart": "처음부터 다시 하면", "back": "시작 화면으로 돌아가면"}
+LEAVE_TEXT = {"home": "타이틀 화면으로 가면", "restart": "처음부터 다시 하면", "back": "시작 화면으로 돌아가면"}
 
 
 @st.dialog("이동하기 전에 확인해 주세요")
@@ -559,268 +810,386 @@ def go_back():
         state.leave_pending = "back"
 
 
+# 로고: 라이트는 파랑(logo.png), 다크는 은색(logo_dark.png). 테마는 hover_css 와 같은 방법으로 안다
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+LOGO = os.path.join(_ASSETS, "logo_dark.png" if getattr(st.context.theme, "type", None) == "dark" else "logo.png")
+
+
+def go_home_from_logo():
+    """맨 위 로고 띠 (콜백): 홈(타이틀 화면)으로. 새 면접 · 이어하기 창에서는 적던 값을 맡겨 두고 타이틀로 (예전 '타이틀로' 버튼),
+    면접 중 · 끝난 뒤에는 기록이 사라지니 상태창 홈 버튼처럼 한 번 더 묻는다."""
+    if state.stage == "start" and state.get("start_mode") in ("new", "resume"):
+        to_title()
+    elif state.stage in ("interview", "done"):
+        state.leave_pending = "home"
+    else:
+        leave("home")
+
+
+# 맨 위: 로고 띠 (타이틀 화면 말고 모든 화면). 띠 전체가 홈 버튼 — 투명 버튼을 띠 위에 겹친다 (hover_css)
+if not (state.stage in ("pick", "start") and state.get("start_mode") not in ("new", "resume")):
+    with st.container(key="logo_bar"):
+        st.image(LOGO)
+        st.button("홈으로 돌아가기", key="logo_home", on_click=go_home_from_logo)
+
 # 맨 위: 뒤로 (시작 화면은 첫 화면이라 없다)
 if state.stage not in ("pick", "start"):
     st.button(":material/arrow_back: 뒤로", key="top_back", on_click=go_back,
               help="한 단계 앞 화면으로 가요. 면접 중이면 한 번 더 물어봐요.")
 
 
-# ── 시작 화면 (한 화면): 1 직군 → 2 시작 방식 → 3 분야 선택 · 4 질문 생성 방식 (2회차부터) → 지원 정보 ──
+# ── 시작: 타이틀 화면 → 새 면접 창 (직군 · 지원 정보) / 이어하기 창 (리포트 불러오기 · 분야 · 지원 정보) ──
+# 창의 입력 칸 key. 타이틀 화면에는 칸이 안 그려져서 Streamlit 이 값을 지우므로, 타이틀로 갈 때 따로 맡겨 둔다
+WINDOW_KEYS = ("f_name", "f_company", "f_company_desc", "f_experience", "resume_skip", "previous_mode", "start_field")
+
+
+# 창마다 맡겨 두는 값: 입력 칸 + 이어 하는 리포트 (새 면접 ↔ 이어하기를 오가도 각자 적던 값이 남게)
+DRAFT_KEYS = (*WINDOW_KEYS, "previous", "active_report")
+MODE_LABELS = {"new": ":material/play_arrow: 새 면접 시작", "resume": ":material/folder_open: 이전 면접 이어하기"}
+
+
+def stash_window():
+    """지금 창(새 면접 / 이어하기)의 값을 그 창 몫으로 맡겨 둔다."""
+    mode = state.get("start_mode")
+    if mode in ("new", "resume"):
+        state.setdefault("window_drafts", {})[mode] = {k: state[k] for k in DRAFT_KEYS if k in state}
+
+
+def open_window(mode: str):
+    """창 열기 (타이틀 메뉴 · 창 위 전환 버튼 콜백). 맡겨 둔 값이 있으면 되돌리고, 없으면 새로
+    (이어하기는 불러온 리포트가 있으면 마지막 것으로). 불러온 목록 · 그룹 · 태그는 남긴다."""
+    draft = state.setdefault("window_drafts", {}).pop(mode, None)
+    for key in DRAFT_KEYS:
+        state.pop(key, None)
+    state.start_mode = mode
+    if draft:
+        state.update(draft)
+    elif mode == "resume" and state.get("reports"):
+        activate_report(list(state.reports)[-1])
+
+
+def to_title():
+    """타이틀로 (맨 위 로고 띠 콜백). 적던 칸은 맡겨 두고, 불러온 리포트는 그대로 둔다."""
+    stash_window()
+    state.start_mode = None
+
+
+def switch_window():
+    """창 위 전환 버튼 (콜백): 지금 창 값을 맡겨 두고 다른 창으로."""
+    stash_window()
+    open_window(state.mode_switch)
+
+
+if state.stage in ("pick", "start") and state.get("start_mode") not in ("new", "resume"):
+    # 타이틀 화면: 게임 첫 화면처럼 로고 + 메뉴 두 개만
+    with st.container(key="title_screen"):
+        st.image(LOGO)  # 스플래시 · 홈이 같이 쓰는 로고 하나 (움직이지 않는다)
+        with st.container(key="title_stage"):
+            # 스플래시 문구: 들어올 때 한 번만 그린다 (홈 버튼으로 돌아와도 다시 나오지 않게 reset 이 splash_done 을 남긴다)
+            if not state.get("splash_done"):
+                state.splash_done = True
+                with st.container(key="splash_text"):
+                    with st.container(key="splash_head"):
+                        st.markdown("질문을 파악하고, 답변을 강화하라!")
+                    with st.container(key="splash_sub"):
+                        st.markdown("합격을 향한 전세역전(戰勢逆轉) 면접 코칭 서비스")
+            with st.container(key="title_body"):
+                st.markdown("신입 모의면접 · 질문 5개와 꼬리 질문으로 실전처럼 연습해요")
+                with st.container(key="title_menu"):
+                    st.button(":material/play_arrow: 새 면접 시작", key="title_new", type="primary", width="stretch",
+                              on_click=open_window, args=("new",))
+                    st.button(":material/folder_open: 이전 면접 이어하기", key="title_resume", width="stretch",
+                              on_click=open_window, args=("resume",))
+                loaded_count = len(state.get("reports", {}))
+                st.caption(f"불러온 리포트 {loaded_count}개 · 이어하기에서 바로 열려요" if loaded_count
+                           else "지난 회차 면접리포트.md 가 있으면 이어하기에서 올려 주세요")
+    st.stop()
+
 if state.stage in ("pick", "start"):
-    st.title("역전 면접 코칭")
-    st.write("신입 모의면접이에요. 질문 5개와 꼬리 질문으로 진행해요.")
+    mode = state.start_mode
     steps = iter(range(1, 10))
 
     def heading(text: str):
         st.subheader(f"{next(steps)}. {text}")  # 고르는 순서를 번호 붙은 소제목으로
 
-    heading("직군")
+    # 맨 위 로고 띠 바로 아래: 새 면접 ↔ 이어하기 전환 (원티드 몽타주 Segmented Control 모양 · hover_css).
+    # 창 제목 · '타이틀로' 버튼 대신 — 지금 어느 창인지는 전환 버튼이, 타이틀로는 로고 띠가 맡는다.
+    state.mode_switch = mode
+    st.segmented_control("면접 방식", list(MODE_LABELS), key="mode_switch", format_func=MODE_LABELS.get,
+                         required=True, on_change=switch_window, label_visibility="collapsed", width="stretch")
+
+    window = st.container(border=True, key="start_window")
+
     job = state.get("job") or default_job()
-    for column, name in zip(st.columns(len(coach.JOBS)), coach.JOBS):
-        mark = ":material/check: " if name == job else ""
-        if column.button(mark + name + ("" if PERSONAS[name] else " (준비 중)"), key=f"pick_job_{name}", width="stretch",
-                         type="primary" if name == job else "secondary"):
-            if not PERSONAS[name]:
-                st.info(f"'{name}' 직군 모드는 준비 중이에요. 면접관 페르소나가 아직 없어요.")
-            elif name != job:
-                reset(name, coach.DEFAULT_FIELD)  # 직군을 바꾸면 아래 칸을 새로 (불러온 리포트 · 그룹 · 태그는 남는다)
-                st.rerun()
+    if mode == "new":
+        with window:
+            heading("직군")
+            for column, name in zip(st.columns(len(coach.JOBS)), coach.JOBS):
+                mark = ":material/check: " if name == job else ""
+                if column.button(mark + name + ("" if PERSONAS[name] else " (준비 중)"), key=f"pick_job_{name}", width="stretch",
+                                 type="primary" if name == job else "secondary"):
+                    if not PERSONAS[name]:
+                        with st.container(key="job_notice"):  # 배경은 스플래시 판과 같은 색 (hover_css)
+                            st.info(f"'{name}' 직군 모드는 준비 중이에요. 면접관 페르소나가 아직 없어요.")
+                    elif name != job:
+                        reset(name, coach.DEFAULT_FIELD)  # 직군을 바꾸면 아래 칸을 새로 (불러온 리포트 · 그룹 · 태그는 남는다)
+                        state.start_mode = "new"
+                        st.rerun()
+            # 면접관 타입 고르기 (직군에 타입이 둘 이상일 때): 새 면접 ↔ 이어하기 전환과 같은 Segmented Control 모양.
+            # 고른 값은 위젯 칸이 아닌 persona_type 에 둔다 (타이틀에 다녀와도 남게)
+            ptypes = coach.persona_type_names(job)
+            if state.get("persona_type") not in ptypes:
+                state.persona_type = ptypes[0] if ptypes else None
+            ptype = state.persona_type
+            if len(ptypes) > 1:
+                heading("면접관")
+
+                def pick_persona_type():
+                    state.persona_type = state.persona_switch
+
+                state.persona_switch = ptype
+                st.segmented_control("면접관 타입", ptypes, key="persona_switch", required=True, on_change=pick_persona_type,
+                                     label_visibility="collapsed", width="stretch")
+            # 고른 면접관(페르소나): 머리줄(누구 · 진행 방식 한 줄)은 카드 밖에, 소개(PERSONA_CARDS 의 직군 → 타입)는
+            # 칸마다 회색 카드 하나씩 2열로 — 왼쪽 열 성격 · 주목하는 인재상, 오른쪽 열 그 밖의 칸 (평가 항목 · 평가 포인트 등,
+            # prompts.py 에 적은 순서 · 칸 이름을 바꾸거나 더해도 그대로 보인다). 같은 줄의 두 카드는 높이를 맞춘다.
+            # 소개가 없으면 페르소나 글을 문장마다 나눠 보인다 (prompts.py 글 그대로 · 읽기만).
+            # 면접 진행 방식 · 말투는 화면에 보이지 않는 설정이라 PERSONA_TYPES 의 persona 글에만 있다
+            lines = coach.persona_lines(job, ptype)
+            with st.container(key="persona_head"):
+                st.markdown(f":material/support_agent: **{job} 면접관** · {lines[0]}" if lines else f"**{job} 면접관**")
+                st.caption(":material/forum: 지원자의 성장을 위해 심층 꼬리 질문 1개와 답변 직후 피드백을 제공해요."
+                           if coach.persona_of(job, ptype)["style"] == "feedback"
+                           else f":material/forum: 답이 부족하면 꼬리 질문으로 한 번 더 확인해요 (질문마다 {coach.MAX_FOLLOW_UPS}개까지).")
+                card = PERSONA_CARDS.get(job, {}).get(ptype)
+                if not card and lines[1:]:
+                    st.caption("  \n".join(lines[1:]))
+            if card:
+                left_titles = [t for t in ("성격", "주목하는 인재상") if t in card]
+                right_titles = [t for t in card if t not in left_titles]
+                with st.container(key="persona_cards"):
+                    for row, pair in enumerate(itertools.zip_longest(left_titles, right_titles)):
+                        for side, (column, title) in enumerate(zip(st.columns(2, gap="small"), pair)):
+                            if title:  # 카드 key 는 자리(줄 · 칸)로 — 한글 칸 이름은 key 글자로 쓸 수 없다
+                                with column.container(key=f"persona_card_{row}{side}"):
+                                    st.markdown(f"**{title}**\n" + "\n".join(f"- {item}" for item in card[title]))
+            # 개발용: .env 에 DEV_MOCK=1 일 때만. AI를 부르지 않고 만점 모의 면접이 끝난 상태로 연다.
+            if DEV_MOCK and job == "디자인":
+                if st.button(":material/science: 모의 데이터로 열기 (개발용 · 만점)", help="data/mock_perfect.json · 위원 평균 10점 · 종합 100점"):
+                    try:
+                        mock = coach.load_mock()
+                    except (OSError, ValueError, KeyError) as e:
+                        st.error(f"모의 데이터를 읽지 못했어요. {e}")
+                    else:
+                        p = mock["profile"]
+                        state.field = p["field"]
+                        resume_without_interview(mock, p["name"], job, p["company"], p["company_desc"], p["experience"],
+                                                 notice="개발용 모의 데이터(만점)를 열었어요. 글은 모두 예시예요.")
     state.job = job
-    # 고른 직군의 면접관(페르소나)을 버튼 아래 회색 배너로 (prompts.py 의 페르소나 글 그대로 · 읽기만)
-    with st.container(key="persona_banner"):
-        lines = coach.persona_lines(job)
-        st.markdown(f":material/support_agent: **{job} 면접관** · {lines[0]}" if lines else f"**{job} 면접관**")
-        if lines[1:]:
-            st.caption("  \n".join(lines[1:]))
     field = state.get("field", coach.DEFAULT_FIELD)
 
-    # 두 갈래 시작: 새 면접 / 이전 면접 이어하기
-    heading("면접 회차 선택")
-    if state.get("start_mode") not in ("new", "resume"):
-        state.start_mode = "new"  # 처음부터 새 면접이 골라져 있어, 화면이 나뉘지 않고 아래 칸까지 한 번에 보인다
-    mode = state.start_mode
-    new_col, resume_col = st.columns(2)
-    if new_col.button(":material/add_circle: 새 면접 시작하기", width="stretch", type="primary" if mode == "new" else "secondary"):
-        if mode != "new":
-            for key in ("previous", "active_report", "f_name", "f_company", "f_company_desc", "f_experience"):
-                state.pop(key, None)  # 이어하기에서 채운 값을 비우고 새로 시작 (불러온 목록은 남긴다)
-        state.start_mode = "new"
-        st.rerun()
-    if resume_col.button(":material/folder_open: 이전 면접 이어하기", width="stretch", type="primary" if mode == "resume" else "secondary"):
-        state.start_mode = "resume"
-        if not state.get("previous") and job_reports():
-            activate_report(list(job_reports())[-1])  # 이미 불러온 리포트가 있으면 마지막 것으로
-        st.rerun()
-    # 개발용: .env 에 DEV_MOCK=1 일 때만. AI를 부르지 않고 만점 모의 면접이 끝난 상태로 연다.
-    if DEV_MOCK and job == "디자인":
-        if st.button(":material/science: 모의 데이터로 열기 (개발용 · 만점)", help="data/mock_perfect.json · 위원 평균 10점 · 종합 100점"):
-            try:
-                mock = coach.load_mock()
-            except (OSError, ValueError, KeyError) as e:
-                st.error(f"모의 데이터를 읽지 못했어요. {e}")
-            else:
-                p = mock["profile"]
-                state.field = p["field"]
-                resume_without_interview(mock, p["name"], job, p["company"], p["company_desc"], p["experience"],
-                                         notice="개발용 모의 데이터(만점)를 열었어요. 글은 모두 예시예요.")
-    if mode == "new":
-        st.caption("지난 회차 면접리포트.md 가 있으면 '이전 면접 이어하기' 를 눌러 올려 주세요.")
-
-    if mode == "resume":
-        # 올리기 칸: 안내 두 줄을 칸 맨 위에 (파일을 올리기 전에 무엇을 올리고 어떻게 되는지 먼저 보이게)
-        with st.container(border=True):
-            st.markdown("**이어서 할 면접리포트.md 를 올려 주세요.** 회사마다 하나씩, 여러 개 올릴 수 있어요.")
-            st.caption("리포트를 올리면 아래에 지난 회차 내용이 채워져요. 올린 리포트는 왼쪽 상태창에서 바꿔 가며 쓸 수 있어요.")
-            files = st.file_uploader(
-                "면접리포트.md 올리기",
-                type=["md"],
-                accept_multiple_files=True,
-                label_visibility="collapsed",
-            )
-        errors = state.setdefault("report_errors", {})
-        # 올리기 칸에서 X 로 지운 파일은 불러온 목록에서도 뺀다.
-        # (칸이 화면에 없던 동안에는 비교할 직전 목록이 없어서 아무것도 빼지 않는다)
-        now_ids = [f.file_id for f in files or []]
-        removed = [fid for fid in state.get("uploader_ids", []) if fid not in now_ids]
-        state.uploader_ids = now_ids
-        if removed:
-            for fid in removed:
-                remove_report(fid)
-            st.rerun()
-        newest = None
-        for f in files or []:
-            if f.file_id in state.reports or f.file_id in errors or f.file_id in state.get("report_dismissed", set()):
-                continue  # 올린 파일은 한 번만 읽는다 · 상태창에서 뺀 파일은 다시 넣지 않는다
-            try:
-                data = coach.parse_report(f.getvalue().decode("utf-8", errors="replace"))
-            except ValueError as e:
-                errors[f.file_id] = f"{f.name}: {e}"
-                continue
-            if data["profile"]["job"] != job:
-                errors[f.file_id] = (
-                    f"{f.name}: '{data['profile']['job']}' 직군 리포트예요. "
-                    "위의 1. 직군 에서 그 직군을 골라 주세요."
+    with window:
+        if mode == "resume":
+            heading("리포트 불러오기")
+            # 올리기 칸: 안내 두 줄을 칸 맨 위에 (파일을 올리기 전에 무엇을 올리고 어떻게 되는지 먼저 보이게)
+            with st.container(border=True):
+                st.markdown("**이어서 할 면접리포트.md 를 올려 주세요.** 회사마다 하나씩, 여러 개 올릴 수 있어요.")
+                st.caption("리포트를 올리면 아래에 지난 회차 내용이 채워져요. 올린 리포트는 왼쪽 상태창에서 바꿔 가며 쓸 수 있어요.")
+                files = st.file_uploader(
+                    "면접리포트.md 올리기",
+                    type=["md"],
+                    accept_multiple_files=True,
+                    label_visibility="collapsed",
                 )
-                continue
-            state.reports[f.file_id] = {**data, "file_name": f.name}
-            newest = f.file_id
-        for f in files or []:
-            if f.file_id in errors:
-                st.warning(errors[f.file_id])
-        if newest:
-            activate_report(newest)  # 마지막으로 올린 리포트로 이어 한다
-            st.rerun()
-        if len(job_reports()) > 1:
-            st.caption(":material/folder_open: 리포트를 여러 개 불러왔어요. 왼쪽 상태창에서 눌러 회사를 바꿀 수 있어요.")
+            errors = state.setdefault("report_errors", {})
+            # 올리기 칸에서 X 로 지운 파일은 불러온 목록에서도 뺀다.
+            # (칸이 화면에 없던 동안에는 비교할 직전 목록이 없어서 아무것도 빼지 않는다)
+            now_ids = [f.file_id for f in files or []]
+            removed = [fid for fid in state.get("uploader_ids", []) if fid not in now_ids]
+            state.uploader_ids = now_ids
+            if removed:
+                for fid in removed:
+                    remove_report(fid)
+                st.rerun()
+            newest = None
+            for f in files or []:
+                if f.file_id in state.reports or f.file_id in errors or f.file_id in state.get("report_dismissed", set()):
+                    continue  # 올린 파일은 한 번만 읽는다 · 상태창에서 뺀 파일은 다시 넣지 않는다
+                try:
+                    data = coach.parse_report(f.getvalue().decode("utf-8", errors="replace"))
+                except ValueError as e:
+                    errors[f.file_id] = f"{f.name}: {e}"
+                    continue
+                if not PERSONAS.get(data["profile"]["job"]):  # 직군은 리포트를 따라가되, 면접관이 없는 직군은 열 수 없다
+                    errors[f.file_id] = f"{f.name}: '{data['profile']['job']}' 직군 모드는 아직 준비 중이에요."
+                    continue
+                state.reports[f.file_id] = {**data, "file_name": f.name}
+                newest = f.file_id
+            for f in files or []:
+                if f.file_id in errors:
+                    st.warning(errors[f.file_id])
+            if newest:
+                activate_report(newest)  # 마지막으로 올린 리포트로 이어 한다
+                st.rerun()
+            if len(job_reports()) > 1:
+                st.caption(":material/folder_open: 리포트를 여러 개 불러왔어요. 왼쪽 상태창에서 눌러 회사를 바꿀 수 있어요.")
+
+            previous = state.get("previous")
+            if not previous:
+                st.stop()
+            # 지난 회차 요약은 테두리 칸 하나에 모은다
+            with st.container(border=True):
+                st.markdown(f"**:material/history: {previous['profile']['company']} · {previous['profile']['job']} · {previous['round']}회차** "
+                            f":gray[({previous['date']} · {previous['profile']['field']} 분야)]")
+                last_col, total_col = st.columns(2)
+                last_col.metric("지난 위원 평균", f"{previous['panel_average']:.1f}/{coach.PANEL_MAX}")
+                if previous["total_latest"] is not None:
+                    total_col.metric("지난 최신 종합", f"{previous['total_latest']}/{coach.TOTAL_MAX}")
+                if previous["next"]:
+                    with st.expander("지난번에 고칠 것으로 받은 것"):
+                        for item in previous["next"]:
+                            st.markdown(f"- {item}")
+                if previous["precheck"]:
+                    st.caption(f"사전 정보 탐색 체크 · 메모 {len(previous['precheck'])}개도 이어서 채워져요.")
+                if coach.criteria_changed(previous):
+                    st.warning("지난 회차와 평가 기준이 달라서 점수 비교가 정확하지 않을 수 있어요.")
+                # 면접을 다시 하지 않고 지난 결과로 이어 하기 (동의 체크처럼 직접 체크해야 적용)
+                if previous.get("session"):
+                    st.checkbox(f"면접 없이 {previous['round']}회차 결과로 이어서 연습하기", key="resume_skip",
+                                help=f"체크하면 같은 {previous['round']}회차의 평가 · 재도전 · 점검하기 · 암기 · 리포트부터 이어서 해요. "
+                                     f"체크하지 않으면 {coach.next_round(previous)}회차 면접을 새로 시작해요.")
+                else:
+                    state.resume_skip = False
+                    st.caption("이 리포트에는 면접 결과 데이터가 없어서, 면접 없이 이어 하기는 할 수 없어요. (결과 저장 기능 전에 받은 리포트)")
 
         previous = state.get("previous")
+        skipping = bool(previous) and bool(state.get("resume_skip"))
+        st.caption(f"이어서 할 회차: **{previous['round']}회차** (면접 없이)" if skipping
+                   else f"이번 면접: **{coach.next_round(previous)}회차**")
+
         if not previous:
-            st.stop()
-        # 지난 회차 요약은 테두리 칸 하나에 모은다
-        with st.container(border=True):
-            st.markdown(f"**:material/history: {previous['profile']['company']} · {previous['round']}회차** "
-                        f":gray[({previous['date']} · {previous['profile']['field']} 분야)]")
-            last_col, total_col = st.columns(2)
-            last_col.metric("지난 위원 평균", f"{previous['panel_average']:.1f}/{coach.PANEL_MAX}")
-            if previous["total_latest"] is not None:
-                total_col.metric("지난 최신 종합", f"{previous['total_latest']}/{coach.TOTAL_MAX}")
-            if previous["next"]:
-                with st.expander("지난번에 고칠 것으로 받은 것"):
-                    for item in previous["next"]:
-                        st.markdown(f"- {item}")
-            if previous["precheck"]:
-                st.caption(f"사전 정보 탐색 체크 · 메모 {len(previous['precheck'])}개도 이어서 채워져요.")
-            if coach.criteria_changed(previous):
-                st.warning("지난 회차와 평가 기준이 달라서 점수 비교가 정확하지 않을 수 있어요.")
-            # 면접을 다시 하지 않고 지난 결과로 이어 하기 (동의 체크처럼 직접 체크해야 적용)
-            if previous.get("session"):
-                st.checkbox(f"면접 없이 {previous['round']}회차 결과로 이어서 연습하기", key="resume_skip",
-                            help=f"체크하면 같은 {previous['round']}회차의 평가 · 재도전 · 점검하기 · 암기 · 리포트부터 이어서 해요. "
-                                 f"체크하지 않으면 {coach.next_round(previous)}회차 면접을 새로 시작해요.")
-            else:
-                state.resume_skip = False
-                st.caption("이 리포트에는 면접 결과 데이터가 없어서, 면접 없이 이어 하기는 할 수 없어요. (결과 저장 기능 전에 받은 리포트)")
-
-    previous = state.get("previous")
-    skipping = bool(previous) and bool(state.get("resume_skip"))
-    st.caption(f"이어서 할 회차: **{previous['round']}회차** (면접 없이)" if skipping
-               else f"이번 면접: **{coach.next_round(previous)}회차**")
-
-    if not previous:
-        # 1회차는 공통 분야로 시작한다 (일반 역량부터) · 2회차부터 분야를 고른다
-        state.field = coach.DEFAULT_FIELD
-        st.caption(":material/info: 1회차는 **공통** 분야로 일반 역량부터 점검해요. 리포트를 받아 2회차를 이어 하면 분야를 고를 수 있어요.")
-    else:
-        # 분야: 리포트로 이어 해도 바꿀 수 있다 (분야를 잘못 골라 진행한 회차를 바로잡기). 바꾸면 이번 회차부터 그 분야로 기록된다.
-        heading("분야 선택")
-
-        def pick_start_field():
-            state.field = state.start_field
-
-        if state.get("start_field") not in FIELDS:
-            state.start_field = field if field in FIELDS else coach.DEFAULT_FIELD
-        chosen = st.pills("분야", list(FIELDS), key="start_field", required=True, on_change=pick_start_field,
-                          label_visibility="collapsed",
-                          help="면접관과 평가 위원회가 이 분야를 고려해요. 리포트로 이어 해도 바꿀 수 있어요.")
-        st.caption(f"{chosen} · {FIELDS[chosen]}")
-        if chosen == coach.DEFAULT_FIELD:  # 지난 회차를 해 본 뒤라면 분야 면접을 권한다
-            st.caption(":material/lightbulb: 지원할 회사의 분야를 고르면 그 분야 질문 · 평가 관점으로 실제 면접에 더 가깝게 연습할 수 있어요.")
-        if previous["profile"]["field"] != chosen:
-            st.info(f"지난 {previous['round']}회차는 **{previous['profile']['field']}** 분야였어요. "
-                    f"{'이어 하는 회차' if skipping else '이번 회차'}부터 **{chosen}** 분야로 기록돼요.")
-
-        if not skipping:
-            heading("질문 생성 방식")
-            modes = list(coach.QUESTION_MODES.values())
-            if state.get("previous_mode") not in modes:
-                state.previous_mode = modes[0]
-            st.radio(
-                "질문 생성 방식", modes, key="previous_mode", label_visibility="collapsed",
-                help="같은 질문: 질문별 점수를 지난번과 비교해요 · 섞어서: 지난 질문 2개를 다시 하고 나머지는 새 질문 · "
-                     "새 질문: 지금까지 불러온 회차에 안 나온 질문부터 골라요 (모자라면 나온 질문을 다시 넣고 알려 드려요).",
-            )
-            if previous["profile"]["field"] != chosen and state.get("previous_mode") == coach.QUESTION_MODES["same"]:
-                st.caption("같은 질문으로 다시 하면 질문은 지난번 그대로예요. 새 분야 질문을 받으려면 '섞어서' 나 '새 질문으로' 를 골라 주세요.")
-
-    heading("지원 정보")
-    with st.form("start"):
-        name = st.text_input("이름", key="f_name")
-        company = st.text_input("회사", key="f_company")
-        company_desc = st.text_input(
-            "회사 설명", key="f_company_desc", help="어떤 서비스를 하는 회사인지 한 줄로 적어 주세요."
-        )
-        experience = st.text_area(
-            "내 경험",
-            height=150,
-            key="f_experience",
-            max_chars=coach.MAX_EXPERIENCE_CHARS,
-            help=f"면접관이 참고할 경험을 {coach.MIN_EXPERIENCE_CHARS}~{coach.MAX_EXPERIENCE_CHARS}자로 적어 주세요.",
-        )
-        started = st.form_submit_button(
-            "지난 결과로 이어서 하기" if state.get("previous") and state.get("resume_skip") else "면접 시작하기",
-            type="primary",
-        )
-
-    if started:
-        name, company, experience = name.strip(), company.strip(), experience.strip()
-        company_desc = company_desc.strip()
-        if not name or not company or not company_desc or not experience:
-            st.warning("이름 · 회사 · 회사 설명 · 내 경험을 모두 적어 주세요.")
-        elif len(experience) < coach.MIN_EXPERIENCE_CHARS:
-            st.warning(f"내 경험을 {coach.MIN_EXPERIENCE_CHARS}자 이상 적어 주세요. (지금 {len(experience)}자)")
-        elif state.get("previous") and state.get("resume_skip"):
-            resume_without_interview(state.previous, name, job, company, company_desc, experience)
+            # 1회차는 공통 분야로 시작한다 (일반 역량부터) · 2회차부터 분야를 고른다
+            state.field = coach.DEFAULT_FIELD
+            st.caption(":material/info: 1회차는 **공통** 분야로 일반 역량부터 점검해요. 리포트를 받아 2회차를 이어 하면 분야를 고를 수 있어요.")
         else:
-            previous = state.get("previous")
-            mode = next((k for k, v in coach.QUESTION_MODES.items() if v == state.get("previous_mode")), "new")
-            # 지금까지 나온 질문: 불러온 이 직군 리포트 + 이어 하는 리포트 (새 질문은 이걸 피해서 고른다)
-            asked = {q for r in [*job_reports().values(), *([previous] if previous else [])] for q in r["questions"]}
-            try:
-                bank = coach.load_questions()
-                questions, note = coach.plan_questions(
-                    bank, job, state.get("field", coach.DEFAULT_FIELD), f"{company} {company_desc}",
-                    mode if previous else "new", previous["questions"] if previous else None, asked,
+            # 분야: 리포트로 이어 해도 바꿀 수 있다 (분야를 잘못 골라 진행한 회차를 바로잡기). 바꾸면 이번 회차부터 그 분야로 기록된다.
+            heading("분야 선택")
+
+            def pick_start_field():
+                state.field = state.start_field
+
+            if state.get("start_field") not in FIELDS:
+                state.start_field = field if field in FIELDS else coach.DEFAULT_FIELD
+            chosen = st.pills("분야", list(FIELDS), key="start_field", required=True, on_change=pick_start_field,
+                              label_visibility="collapsed",
+                              help="면접관과 평가 위원회가 이 분야를 고려해요. 리포트로 이어 해도 바꿀 수 있어요.")
+            st.caption(f"{chosen} · {FIELDS[chosen]}")
+            if chosen == coach.DEFAULT_FIELD:  # 지난 회차를 해 본 뒤라면 분야 면접을 권한다
+                st.caption(":material/lightbulb: 지원할 회사의 분야를 고르면 그 분야 질문 · 평가 관점으로 실제 면접에 더 가깝게 연습할 수 있어요.")
+            if previous["profile"]["field"] != chosen:
+                st.info(f"지난 {previous['round']}회차는 **{previous['profile']['field']}** 분야였어요. "
+                        f"{'이어 하는 회차' if skipping else '이번 회차'}부터 **{chosen}** 분야로 기록돼요.")
+
+            if not skipping:
+                heading("질문 생성 방식")
+                modes = list(coach.QUESTION_MODES.values())
+                if state.get("previous_mode") not in modes:
+                    state.previous_mode = modes[0]
+                st.radio(
+                    "질문 생성 방식", modes, key="previous_mode", label_visibility="collapsed",
+                    help="같은 질문: 질문별 점수를 지난번과 비교해요 · 섞어서: 지난 질문 2개를 다시 하고 나머지는 새 질문 · "
+                         "새 질문: 지금까지 불러온 회차에 안 나온 질문부터 골라요 (모자라면 나온 질문을 다시 넣고 알려 드려요).",
                 )
-                if note:
-                    state.notice = note
-            except (OSError, ValueError, KeyError):
-                st.error("질문 은행(data/questions.csv)을 읽지 못했어요.")
+                if previous["profile"]["field"] != chosen and state.get("previous_mode") == coach.QUESTION_MODES["same"]:
+                    st.caption("같은 질문으로 다시 하면 질문은 지난번 그대로예요. 새 분야 질문을 받으려면 '섞어서' 나 '새 질문으로' 를 골라 주세요.")
+
+        heading("지원 정보")
+        # 시작 버튼은 네 칸이 다 차기 전까지 브라우저에서 비활성화한다 (START_GUARD_JS · 폼은 제출 전 값을 서버로 보내지 않아서).
+        # 빈칸 · 글자 수 확인은 아래 started 에서 그대로 한다 (Enter 로 제출하는 경우까지)
+        with st.form("start"):
+            name = st.text_input("이름 (필수)", key="f_name")
+            company = st.text_input("회사 이름 (필수)", key="f_company")
+            company_desc = st.text_input(
+                "회사 설명 (필수)", key="f_company_desc", help="어떤 서비스를 하는 회사인지 한 줄로 적어 주세요.",
+                placeholder="예시: IT, 헬스케어 진단 서비스",  # 칸이 비었을 때만 연한 회색으로 보이고, 적기 시작하면 사라진다
+            )
+            experience = st.text_area(
+                "내 경험 (필수)",
+                height=170,
+                key="f_experience",
+                max_chars=coach.MAX_EXPERIENCE_CHARS,
+                placeholder=f"{coach.MAX_EXPERIENCE_CHARS:,}자 이내로 입력해주세요.\n"
+                            "예시: 대학 팀 프로젝트에서 중고 거래 앱의 UX/UI 디자인을 맡은 경험이 있습니다. "
+                            "사용자 인터뷰 5회를 통해 결제 단계의 이탈 원인을 파악하고 화면 흐름을 3단계에서 2단계로 줄였으며, "
+                            "피그마 프로토타입으로 개발자와 함께 사용성 테스트를 진행했습니다.",
+                help=f"면접관이 참고할 경험을 {coach.MIN_EXPERIENCE_CHARS}~{coach.MAX_EXPERIENCE_CHARS}자로 적어 주세요.",
+            )
+            started = st.form_submit_button(
+                "지난 결과로 이어서 하기" if state.get("previous") and state.get("resume_skip") else "면접 시작하기",
+                type="primary",
+            )
+
+        if started:
+            name, company, experience = name.strip(), company.strip(), experience.strip()
+            company_desc = company_desc.strip()
+            if not name or not company or not company_desc or not experience:
+                st.warning("이름 · 회사 이름 · 회사 설명 · 내 경험을 모두 적어 주세요.")
+            elif len(experience) < coach.MIN_EXPERIENCE_CHARS:
+                st.warning(f"내 경험을 {coach.MIN_EXPERIENCE_CHARS}자 이상 적어 주세요. (지금 {len(experience)}자)")
+            elif state.get("previous") and state.get("resume_skip"):
+                resume_without_interview(state.previous, name, job, company, company_desc, experience)
             else:
-                state.profile = {
-                    "name": name,
-                    "field": state.get("field", coach.DEFAULT_FIELD),
-                    "job": job,
-                    "company": company,
-                    "company_desc": company_desc,
-                    "experience": experience,
-                }
-                state.questions = questions
-                state.round = coach.next_round(previous)
-                if previous:
-                    restore_precheck(previous["precheck"])
-                state.q_index = 0
-                state.follow_ups = 0
-                state.understanding = None
-                state.evaluation = None
-                state.pop("clue_set", None); state.pop("clue_round", None)  # 새 평가에서 실마리를 다시 찾는다
-                state.retries = {}
-                state.retry_history = {}
-                state.memo_edits, state.memo_reviews = {}, {}  # 고친 대본 · 검토 내역은 질문이 바뀌면 맞지 않는다
-                state.last_question = None
-                state.last_suggest = None
-                state.highlights = {}
-                state.strategies = {}
-                state.retry_counts = {}
-                state.verdict_open = False
-                state.messages = [
-                    {"role": "assistant", "content": f"{name} 님, 면접을 시작하겠습니다."},
-                    question_message(0),
-                ]
-                # 지난 회차와 같은 질문 수 (브리핑 안내 · 같은 질문은 평가 뒤 질문별 비교)
-                state.same_questions = bool(previous) and [q["question"] for q in questions] == list(previous["questions"])
-                state.kept_questions = sum(q["question"] in set(previous["questions"]) for q in questions[1:]) if previous else 0
-                state.stage = "briefing"
-                st.rerun()
+                previous = state.get("previous")
+                mode = next((k for k, v in coach.QUESTION_MODES.items() if v == state.get("previous_mode")), "new")
+                # 지금까지 나온 질문: 불러온 이 직군 리포트 + 이어 하는 리포트 (새 질문은 이걸 피해서 고른다)
+                asked = {q for r in [*job_reports().values(), *([previous] if previous else [])] for q in r["questions"]}
+                try:
+                    bank = coach.load_questions()
+                    questions, note = coach.plan_questions(
+                        bank, job, state.get("field", coach.DEFAULT_FIELD), f"{company} {company_desc}",
+                        mode if previous else "new", previous["questions"] if previous else None, asked,
+                    )
+                    if note:
+                        state.notice = note
+                except (OSError, ValueError, KeyError):
+                    st.error("질문 은행(data/questions.csv)을 읽지 못했어요.")
+                else:
+                    state.profile = {
+                        "name": name,
+                        "field": state.get("field", coach.DEFAULT_FIELD),
+                        "job": job,
+                        "company": company,
+                        "company_desc": company_desc,
+                        "experience": experience,
+                        "persona_type": state.get("persona_type"),  # 면접관 타입 (새 면접 창에서 고른 것)
+                    }
+                    state.questions = questions
+                    state.round = coach.next_round(previous)
+                    if previous:
+                        restore_precheck(previous["precheck"])
+                    state.q_index = 0
+                    state.follow_ups = 0
+                    state.understanding = None
+                    state.evaluation = None
+                    state.pop("clue_set", None); state.pop("clue_round", None)  # 새 평가에서 실마리를 다시 찾는다
+                    state.retries = {}
+                    state.retry_history = {}
+                    state.memo_edits, state.memo_reviews = {}, {}  # 고친 대본 · 검토 내역은 질문이 바뀌면 맞지 않는다
+                    state.last_question = None
+                    state.last_suggest = None
+                    state.highlights = {}
+                    state.strategies = {}
+                    state.retry_counts = {}
+                    state.verdict_open = False
+                    state.messages = [
+                        {"role": "assistant", "content": f"{name} 님, 면접을 시작하겠습니다."},
+                        question_message(0),
+                    ]
+                    # 지난 회차와 같은 질문 수 (브리핑 안내 · 같은 질문은 평가 뒤 질문별 비교)
+                    state.same_questions = bool(previous) and [q["question"] for q in questions] == list(previous["questions"])
+                    state.kept_questions = sum(q["question"] in set(previous["questions"]) for q in questions[1:]) if previous else 0
+                    state.stage = "briefing"
+                    st.rerun()
     st.stop()
 
 
@@ -832,7 +1201,7 @@ if state.stage == "briefing":
         st.markdown(f"**:material/business: 회사** · {profile['company']} ({profile['company_desc']})")
         st.markdown(f"**:material/explore: 분야** · {coach.field_of(profile)} ({FIELDS[coach.field_of(profile)]})")
         st.markdown(f"**:material/work: 직군** · {profile['job']} 신입 · {state.round}회차")
-        st.markdown(f"**{AVATARS['assistant']} 면접관** · {coach.persona_summary(profile['job'])}")
+        st.markdown(f"**{AVATARS['assistant']} 면접관** · {coach.persona_summary(profile['job'], profile.get('persona_type'))}")
         kinds = " → ".join(
             q["type"] + (" :material/explore:" if q.get("field", coach.DEFAULT_FIELD) != coach.DEFAULT_FIELD else "")
             for q in state.questions
@@ -2878,7 +3247,7 @@ if answer is not None:
             st.markdown(answer)
 
     question = state.questions[state.q_index]
-    instructions = coach.build_interviewer(profile, question)
+    instructions = coach.build_interviewer(profile, question, state.follow_ups)
     transcript = coach.format_transcript(state.messages + [{"role": "user", "content": answer}])
 
     try:
@@ -2894,14 +3263,16 @@ if answer is not None:
     state.understanding = coach.clamp(result.get("understanding"), 0, 100)
     reply = str(result.get("reply", "")).strip()
     ai_wants_follow_up = bool(result.get("follow_up"))
+    # 꼬리 질문 뒤 피드백형 면접관: 꼬리 질문의 답 다음 reply 는 피드백이라 AI 가 follow_up 을 잘못 줘도 보여 준다
+    feedback_style = coach.persona_of(profile["job"], profile.get("persona_type"))["style"] == "feedback"
 
-    if coach.should_follow_up(ai_wants_follow_up, state.follow_ups):
+    if coach.wants_follow_up(profile, ai_wants_follow_up, state.follow_ups):
         # 꼬리 질문: 같은 질문에 머문다.
         state.follow_ups += 1
         state.messages.append({"role": "assistant", "content": reply, "q": q})
     else:
         # AI가 꼬리 질문을 더 원해도 한도를 넘으면 그 문장(질문)은 보여 주지 않고 넘어간다.
-        if reply and not ai_wants_follow_up:
+        if reply and (feedback_style or not ai_wants_follow_up):
             state.messages.append({"role": "assistant", "content": reply, "q": q})
         state.q_index += 1
         state.follow_ups = 0

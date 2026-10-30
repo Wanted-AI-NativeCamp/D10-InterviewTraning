@@ -12,12 +12,15 @@ from prompts import (
     CONTEXT,
     FIELDS,
     EVALUATOR,
+    FEEDBACK_STAGES,
     HIGHLIGHT,
     INTERVIEWER,
+    INTERVIEWER_FEEDBACK,
     LAST_QUESTION,
     LAST_SUGGEST,
     PANEL_CRITERIA,
     PANEL_ROLES,
+    PERSONA_TYPES,
     PERSONAS,
     RETRY,
     STRATEGY,
@@ -320,13 +323,24 @@ def build_context(profile: dict) -> str:
     )
 
 
-def build_interviewer(profile: dict, question: dict) -> str:
-    return INTERVIEWER.format(
-        persona=PERSONAS[profile["job"]],
-        context=build_context(profile),
-        question=question["question"],
-        point=question["point"],
-    )
+def build_interviewer(profile: dict, question: dict, follow_ups_done: int = 0) -> str:
+    """면접관 지시문. 면접관 타입이 꼬리 질문 뒤 피드백형(feedback)이면 INTERVIEWER_FEEDBACK 에
+    지금 단계(기본 질문의 답 / 꼬리 질문의 답)를 넣는다. 꼬리 질문 여부 · 한도는 코드가 정한다 (wants_follow_up)."""
+    persona = persona_of(profile["job"], profile.get("persona_type"))
+    fields = dict(persona=persona["persona"], context=build_context(profile),
+                  question=question["question"], point=question["point"])
+    if persona["style"] == "feedback":
+        stage = FEEDBACK_STAGES[min(follow_ups_done, max(FEEDBACK_STAGES))]
+        return INTERVIEWER_FEEDBACK.format(stage=stage, **fields)
+    return INTERVIEWER.format(**fields)
+
+
+def wants_follow_up(profile: dict, ai_wants: bool, follow_ups_done: int) -> bool:
+    """꼬리 질문을 할지 코드가 정한다. 꼬리 질문 뒤 피드백형은 AI 답과 상관없이 질문마다 정확히 1개
+    (기본 질문의 답 다음엔 꼬리 질문, 꼬리 질문의 답 다음엔 피드백 후 다음 질문). 나머지는 AI 판단 + 한도."""
+    if persona_of(profile["job"], profile.get("persona_type"))["style"] == "feedback":
+        return follow_ups_done < MAX_FOLLOW_UPS
+    return should_follow_up(ai_wants, follow_ups_done)
 
 
 def format_panel_criteria() -> str:
@@ -506,15 +520,28 @@ def criteria_version() -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
 
 
-def persona_lines(job: str) -> list[str]:
+def persona_type_names(job: str) -> list[str]:
+    """직군의 면접관 타입 이름 (첫 번째가 기본). 타입이 없는 직군은 빈 목록."""
+    return list(PERSONA_TYPES.get(job, {}))
+
+
+def persona_of(job: str, persona_type: str | None = None) -> dict:
+    """면접관 글 · 진행 방식. 모르는 타입이면 첫 타입, 타입이 없는 직군은 PERSONAS 글을 꼬리 질문형(probe)으로."""
+    types = PERSONA_TYPES.get(job, {})
+    if types:
+        return types.get(persona_type) or next(iter(types.values()))
+    return {"persona": PERSONAS.get(job, ""), "style": "probe"}
+
+
+def persona_lines(job: str, persona_type: str | None = None) -> list[str]:
     """시작 화면 배너용 면접관 소개: 페르소나 글(prompts.py)을 문장마다 나눈다. 글은 바꾸지 않고 '(역할)' 표시만 뺀다."""
-    persona = PERSONAS.get(job, "").replace("(역할)", "").strip()
+    persona = persona_of(job, persona_type)["persona"].replace("(역할)", "").strip()
     return [s.strip().rstrip(".").rstrip() + "." for s in re.split(r"(?<=[.])\s+", persona) if s.strip()]
 
 
-def persona_summary(job: str) -> str:
+def persona_summary(job: str, persona_type: str | None = None) -> str:
     """브리핑용 면접관 한 줄 (페르소나의 첫 문장)."""
-    persona = PERSONAS.get(job, "").strip()
+    persona = persona_of(job, persona_type)["persona"].strip()
     return persona.split(". ")[0].rstrip(".") if persona else "(페르소나 없음)"
 
 
@@ -793,7 +820,7 @@ def load_panel_rationale(path: Path = PANEL_RATIONALE_PATH) -> str:
 
 def build_retry(profile: dict, question: dict, before: str, weak: str) -> str:
     return RETRY.format(
-        persona=PERSONAS[profile["job"]],
+        persona=persona_of(profile["job"], profile.get("persona_type"))["persona"],
         context=build_context(profile),
         question=question["question"],
         point=question["point"],
