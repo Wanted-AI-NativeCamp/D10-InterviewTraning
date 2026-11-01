@@ -24,6 +24,7 @@ from prompts import (
     LAST_SUGGEST_SCHEMA,
     PANEL_CRITERIA,
     PERSONA_CARDS,
+    PERSONA_TAGS,
     PERSONAS,
     RETRY_SCHEMA,
     STRATEGY_SCHEMA,
@@ -180,6 +181,18 @@ def hover_css() -> str:
 :is(.st-key-mode_switch, .st-key-persona_switch) button:active {{ transform: scale(0.98); }}  /* 누르는 순간 살짝 눌리는 느낌 */
 :is(.st-key-mode_switch, .st-key-persona_switch) button[aria-checked="true"] {{ color: {"#F7F7F8" if dark else "#171719"} !important; }}
 :is(.st-key-mode_switch, .st-key-persona_switch) button[aria-checked="true"] p {{ font-weight: 600; }}
+/* 면접관 타입 옆 태그 (PERSONA_TAGS): 누르는 기능 없는 정보 태그 — 양 끝 원형 알약 · 고른 칸이어도 굵기 그대로 · 클릭은 버튼으로 넘긴다 */
+.st-key-persona_switch button :is(.stMarkdownBadge, [data-testid="stMarkdownBadge"]) {{
+  border-radius: 999px !important; padding: 2px 8px !important; margin: 0 !important; font-size: 12px !important; font-weight: 500 !important;
+  line-height: 1.4; pointer-events: none; user-select: none; }}
+/* 이름 + 태그: 칸 안에 들어가면 한 줄 · 가운데, 안 들어가면 태그만 둘째 줄 가운데로 (정한 너비 없이 실제 글 길이로).
+   태그는 줄을 나누지 않고, 이름은 그 자체로도 칸보다 길 때만 띄어쓰기에서 나눈다. 버튼 높이는 줄 수에 따라 늘었다 줄었다 (최소 40) */
+.st-key-persona_switch button {{ height: auto !important; justify-content: center !important; }}
+.st-key-persona_switch button > div, .st-key-persona_switch button > div > span,
+.st-key-persona_switch button [data-testid="stMarkdownContainer"] {{ width: 100%; min-width: 0; }}
+.st-key-persona_switch button p {{ display: flex !important; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 2px 4px; white-space: normal !important; word-break: keep-all; text-align: center; margin: 0 !important; }}
+.st-key-persona_switch button .stMarkdownBadge {{ white-space: nowrap; flex-shrink: 0; }}
 :is(.st-key-mode_switch, .st-key-persona_switch) button:focus-visible {{ outline: 2px solid {title["focus"]} !important; outline-offset: 1px; }}
 @media (prefers-reduced-motion: reduce) {{
   :is(.st-key-mode_switch, .st-key-persona_switch) [data-testid="stButtonGroup"] > div::before, :is(.st-key-mode_switch, .st-key-persona_switch) button,
@@ -890,11 +903,11 @@ if state.stage in ("pick", "start") and state.get("start_mode") not in ("new", "
                 state.splash_done = True
                 with st.container(key="splash_text"):
                     with st.container(key="splash_head"):
-                        st.markdown("질문을 파악하고, 답변을 강화하라!")
+                        st.markdown("질문을 파악하고, 전략을 강화하라!")
                     with st.container(key="splash_sub"):
-                        st.markdown("합격을 향한 전세역전(戰勢逆轉) 면접 코칭 서비스")
+                        st.markdown("합격을 향한 전세역전(戰勢逆轉) 취업 코칭 서비스")
             with st.container(key="title_body"):
-                st.markdown("신입 모의면접 · 질문 5개와 꼬리 질문으로 실전처럼 연습해요")
+                st.markdown("모의면접 · 질문 5개와 꼬리 질문으로 경험과 전략을 발전시켜요.")
                 with st.container(key="title_menu"):
                     st.button(":material/play_arrow: 새 면접 시작", key="title_new", type="primary", width="stretch",
                               on_click=open_window, args=("new",))
@@ -947,9 +960,13 @@ if state.stage in ("pick", "start"):
                 def pick_persona_type():
                     state.persona_type = state.persona_switch
 
+                def persona_label(name: str) -> str:  # 타입 이름 옆에 태그 배지 (PERSONA_TAGS)
+                    tag = PERSONA_TAGS.get(job, {}).get(name)
+                    return f"{name} :blue-badge[{tag}]" if tag else name
+
                 state.persona_switch = ptype
                 st.segmented_control("면접관 타입", ptypes, key="persona_switch", required=True, on_change=pick_persona_type,
-                                     label_visibility="collapsed", width="stretch")
+                                     format_func=persona_label, label_visibility="collapsed", width="stretch")
             # 고른 면접관(페르소나): 머리줄(누구 · 진행 방식 한 줄)은 카드 밖에, 소개(PERSONA_CARDS 의 직군 → 타입)는
             # 칸마다 회색 카드 하나씩 2열로 — 왼쪽 열 성격 · 주목하는 인재상, 오른쪽 열 그 밖의 칸 (평가 항목 · 평가 포인트 등,
             # prompts.py 에 적은 순서 · 칸 이름을 바꾸거나 더해도 그대로 보인다). 같은 줄의 두 카드는 높이를 맞춘다.
