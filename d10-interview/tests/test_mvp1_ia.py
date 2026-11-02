@@ -262,7 +262,7 @@ class GnbLnbScreenTest(AppFlowCase):
         for removed in ("암기", "점검하기", "단계 중", "리포트 저장하기"):
             self.assertNotIn(removed, text)
         self.assertEqual(list(self.at.segmented_control(key="lnb").options),
-                         [l.split(": ", 1)[1] for l in (LNB_RECORDS, LNB_EVAL, LNB_RETRY)])
+                         [l.split(": ", 1)[1] for l in (LNB_EVAL, LNB_RECORDS, LNB_RETRY)])  # 평가 기록이 먼저
 
 
 if __name__ == "__main__":

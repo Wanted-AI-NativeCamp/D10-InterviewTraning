@@ -342,7 +342,7 @@ DEV_MOCK = os.getenv("DEV_MOCK", "").strip() == "1"  # 개발용 모의 데이�
 LNB_RECORDS = ":material/history: 면접 기록 (전체)"
 LNB_EVAL = ":material/bar_chart: 평가 기록 (회차별)"
 LNB_RETRY = ":material/replay: 재도전 (전체)"
-LNBS = [LNB_RECORDS, LNB_EVAL, LNB_RETRY]
+LNBS = [LNB_EVAL, LNB_RECORDS, LNB_RETRY]  # 평가 기록이 먼저. 들어가는 탭은 순서가 아니라 이동하는 곳에서 정한다
 # 화면 함수들이 쓰던 탭 이름 → LNB (go_tab 으로 이동)
 EVAL_TAB, RETRY_TAB, LAST_TAB = LNB_EVAL, LNB_RETRY, LNB_RECORDS
 GNB = [("home", ":material/home: 홈"), ("coaching", ":material/forum: 면접 코칭")]
@@ -1926,6 +1926,14 @@ def show_status_sidebar(record: dict):
             st.rerun()
 
 
+def go_round_eval():
+    """[평가 확인하기] → 그 회사 · 직군 · 이 회차의 평가 기록 (LNB 평가 기록, 이 회차를 고른 상태).
+    면접 기록 탭으로 바꿔도 같은 회차가 보이게 records_round 도 맞춘다."""
+    record = active_round()
+    open_group(record.get("company_key"), record["job"], LNB_EVAL)
+    state.records_round = record["round_id"]
+
+
 def go_round_record():
     """[평가 확인하기] → 그 회사 · 직군 · 회차의 면접 기록 확인 화면 (LNB 면접 기록 (전체) 에서 이 회차를 고른 상태)."""
     record = active_round()
@@ -1964,7 +1972,7 @@ def show_interview_done():
         st.markdown(f"**:material/task_alt: 질문 {coach.TOTAL_QUESTIONS}개를 모두 마쳤어요. 수고하셨습니다.**")
         if state.evaluation:
             st.caption("평가가 끝났어요. 이 회차의 면접 기록에서 위원 4명의 평가를 확인해 주세요.")
-            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_round_record)
+            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_round_eval)
         else:
             if state.pop("eval_running", False) and request_evaluation():  # 깃발을 먼저 내려 끊겨도 다시 부르지 않는다
                 st.rerun()
@@ -2023,7 +2031,8 @@ def show_company_list():
 
 
 def show_records(rounds: list[dict]):
-    """LNB 1 · 면접 기록 (전체): 회차별 면접 기록 확인 · 전체 회차 종합 (공통/분야) · 전체 회차 진행도 (공통/분야)."""
+    """LNB 2 · 면접 기록 (전체): ① 회차별 면접 기록 표 → ② 확인할 회차 → ③ 고른 회차 핵심 정보 →
+    전체 회차 종합 · 진행도 (공통/분야) → ④ 맨 아래 전체 면접 대화 기록 (기본 접힘). 평가는 LNB 평가 기록에서."""
     st.subheader(":material/list_alt: 회차별 면접 기록")
     table = []
     for r in rounds:
@@ -2035,33 +2044,51 @@ def show_records(rounds: list[dict]):
     st.dataframe(table, hide_index=True, width="stretch")
     ids = [r["round_id"] for r in rounds]
     labels = {r["round_id"]: round_label(r) for r in rounds}
-    if state.get("records_round") not in ids:
-        state.records_round = state.active_round_id if state.get("active_round_id") in ids else ids[-1]
-    picked = find_round(st.selectbox("확인할 회차", ids, key="records_round", format_func=labels.get))
-    with st.container(border=True):
-        st.markdown(f"**{round_label(picked)}**")
-        if picked.get("stage") == "summary":
-            st.caption("결과 데이터 저장 기능 전에 받은 옛 리포트라 질문과 점수만 있어요.")
-            for i, q in enumerate(picked["questions"]):
-                scores = (picked.get("summary") or {}).get("scores") or []
-                st.markdown(f"**질문 {i + 1}.** {q['question']}" + (f" · {scores[i]}점" if i < len(scores) else ""))
-        else:
-            for message in picked.get("messages") or []:
-                with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
-                    st.markdown(message["content"])
-        with st.container(horizontal=True, gap="small"):
-            if picked.get("stage") == "interview":
-                if st.button(":material/play_arrow: 면접 이어서 하기", key="records_resume", type="primary"):
-                    load_round(picked["round_id"])
-                    state.page = "interview"
-                    st.rerun()
-            elif picked.get("stage") == "done":
-                label = ":material/bar_chart: 평가 기록 보기" if picked.get("evaluation") else ":material/gavel: 평가 받으러 가기"
-                if st.button(label, key="records_eval", type="primary"):
-                    open_round(picked["round_id"], LNB_EVAL)
-                    st.rerun()
+    # 고른 회차는 화면 상태(active_round)와 같게 맞춘다 (그리기 전에만 정할 수 있다):
+    # 평가 기록 · 재도전에서 고른 회차가 여기서도, 여기서 고른 회차가 그쪽에서도 보인다 (changed → load_round)
+    state.records_round = state.active_round_id if state.get("active_round_id") in ids else ids[-1]
+
+    def changed():  # 고른 회차를 화면 상태로 펼쳐, 평가 기록 · 재도전 탭으로 바꿔도 같은 회차가 보이게
+        load_round(state.records_round)
+
+    picked = find_round(st.selectbox("확인할 회차", ids, key="records_round", format_func=labels.get, on_change=changed))
+    show_round_summary(picked)
     st.divider()
     show_overview(rounds)
+    st.divider()
+    with st.expander(f":material/forum: 전체 면접 대화 기록 · {picked['round_number']}회차", expanded=False):
+        if picked.get("stage") == "summary" or not picked.get("messages"):
+            st.caption("이 회차는 대화 기록이 없어요 (옛 리포트는 질문과 점수만 있어요).")
+        for message in picked.get("messages") or []:
+            with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
+                st.markdown(message["content"])
+
+
+def show_round_summary(picked: dict):
+    """면접 기록 탭 ③ 고른 회차 핵심 정보: 회차 · 상태 · 종합 점수 · 질문 5개 (질문별 최초 점수). 대화 전문은 맨 아래 접힘."""
+    first, latest = round_totals(picked)
+    evaluated = {a["no"]: a["score"] for a in (picked.get("evaluation") or {}).get("answers") or []}
+    scores = (picked.get("summary") or {}).get("scores") or []
+    with st.container(border=True):
+        st.markdown(f"**{round_label(picked)}**")
+        if first is not None:
+            st.caption(f"최초 종합 {first}/{coach.TOTAL_MAX} · 최신 종합 {latest if latest is not None else '-'}/{coach.TOTAL_MAX}")
+        lines = []
+        for i, q in enumerate(picked.get("questions") or []):
+            score = evaluated.get(i + 1, scores[i] if i < len(scores) else None)
+            lines.append(f"{i + 1}. {q['question']}" + (f" · 최초 {score}점" if score is not None else ""))
+        st.markdown("\n".join(lines))
+        if picked.get("stage") == "summary":
+            st.caption("결과 데이터 저장 기능 전에 받은 옛 리포트라 질문과 점수만 있어요.")
+        elif picked.get("stage") == "interview":
+            if st.button(":material/play_arrow: 면접 이어서 하기", key="records_resume", type="primary"):
+                load_round(picked["round_id"])
+                state.page = "interview"
+                st.rerun()
+        elif picked.get("evaluation"):
+            st.caption("위원 4명의 평가는 위쪽 '평가 기록' 탭에서 확인해요.")
+        else:
+            st.caption("아직 평가 전이에요. 위쪽 '평가 기록' 탭에서 평가받을 수 있어요.")
 
 
 def pick_round(rounds: list[dict], key: str, allowed) -> dict | None:
