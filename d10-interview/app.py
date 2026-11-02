@@ -1542,11 +1542,14 @@ def go_page(page: str):
     state.page_top = True  # 다른 화면으로 가면 맨 위부터 (면접 화면은 입력창 때문에 맨 아래에 붙어 있다)
 
 
-def open_group(key: str | None, job: str, lnb: str = LNB_RECORDS):
+def open_group(key: str | None, job: str, lnb: str | None = None):
+    """면접 상세(LNB)로. lnb 를 주면 그 탭, 안 주면 사용자가 마지막에 고른 탭 (없으면 면접 기록).
+    LNB 위젯 키(lnb)는 위젯을 그린 뒤에는 바꿀 수 없어서 (StreamlitAPIException), 갈 탭은 lnb_target 에 두고
+    page_coaching 이 LNB 를 그리기 직전에 옮긴다. 버튼 처리 중 · 콜백 · 화면 흐름 어디서 불러도 같다."""
     state.page = "coaching"
     state.page_top = True
     state.coach_group = {"key": key, "job": job}
-    state.lnb = lnb
+    state.lnb_target = lnb or (state.get("lnb_choice") if state.get("lnb_choice") in LNBS else LNB_RECORDS)
 
 
 def open_round(round_id: str, lnb: str):
@@ -1984,9 +1987,12 @@ def page_coaching():
     if back_col.button(":material/list: 면접 데이터 목록", key="back_to_list", width="stretch"):
         state.coach_group = None
         st.rerun()
-    if state.get("lnb") not in LNBS:
-        state.lnb = LNB_RECORDS
+    if "lnb_target" in state:  # open_group 이 정한 탭 (LNB 를 그리기 전에만 키를 바꿀 수 있다)
+        state.lnb = state.pop("lnb_target")
+    if state.get("lnb") not in LNBS:  # GNB 로 다시 들어오면 위젯 키가 지워져 있다 → 마지막에 고른 탭
+        state.lnb = state.get("lnb_choice") if state.get("lnb_choice") in LNBS else LNB_RECORDS
     lnb = st.segmented_control("면접 상세", LNBS, key="lnb", required=True, label_visibility="collapsed", width="stretch")
+    state.lnb_choice = lnb  # 다른 화면에 다녀와도 고른 탭을 기억 (위젯 키는 화면에서 빠지면 지워진다)
     if lnb == LNB_RECORDS:
         show_records(rounds)
     elif lnb == LNB_EVAL:
