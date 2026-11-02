@@ -172,11 +172,14 @@ class FollowUpTest(unittest.TestCase):
         self.assertFalse(coach.wants_follow_up(self.PROFILE, False, 0))
         self.assertFalse(coach.wants_follow_up(self.PROFILE, True, 1))
 
-    def test_feedback_style_always_once(self):
-        """꼬리 질문 뒤 피드백형: AI 판단과 상관없이 질문마다 정확히 1개."""
-        profile = {"job": JOB, "persona_type": "프로덕트 디자인 리드"}
-        self.assertTrue(coach.wants_follow_up(profile, False, 0))
-        self.assertFalse(coach.wants_follow_up(profile, True, 1))
+    def test_one_representative_interviewer_per_job(self):
+        """MVP1: 직군마다 대표 면접관 1명 · 면접 중 피드백형(빠른 피드백) 없음 (PRD 0.2). 디자인은 '디자인 팀장'."""
+        self.assertEqual(coach.persona_type_names(JOB), ["디자인 팀장"])
+        for job in coach.JOBS:
+            with self.subTest(job=job):
+                self.assertTrue(coach.persona_of(job)["persona"])          # 모든 직군에 면접관 문장이 있다
+                self.assertEqual(coach.persona_of(job)["style"], "probe")  # 답이 부족할 때만 꼬리 질문
+                self.assertLessEqual(len(coach.persona_type_names(job)), 1)
 
     def test_unknown_or_missing_type_uses_first(self):
         for ptype in (None, "없는 타입"):

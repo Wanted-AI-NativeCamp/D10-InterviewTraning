@@ -119,8 +119,11 @@ class V1PartialTest(unittest.TestCase):
     def test_job_without_persona(self):
         parsed = coach.parse_report(read("partial", "v1_job_without_persona.md"))
         self.assertEqual(parsed["profile"]["job"], "개발")
-        self.assertFalse(PERSONAS["개발"])  # 앱은 이 직군 리포트를 올리기에서 막는다
+        self.assertTrue(PERSONAS["개발"])  # MVP1: 개발 직군에도 대표 면접관이 있어 이 리포트를 불러올 수 있다
         self.assertIsNone(coach.match_questions(coach.load_questions(), "개발", parsed["questions"]))
+        # 질문 은행에 없는 과거 질문도 글 그대로 보존 (question_id 는 비워 둔다 — 매핑 실패 처리 방식은 미확정)
+        [(record, _)] = coach.parse_store_file(read("partial", "v1_job_without_persona.md"), coach.load_questions())["rounds"]
+        self.assertEqual([q["question"] for q in record["questions"]], parsed["questions"])
 
 
 class V1UnsupportedTest(unittest.TestCase):

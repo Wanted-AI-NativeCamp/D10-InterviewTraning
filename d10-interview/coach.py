@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import re
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -114,7 +115,8 @@ def fits_company(keywords: str, company_text: str) -> bool:
 def question_row(row) -> dict:
     """질문 은행 한 줄 → 면접에서 쓰는 질문. example: 가상 지원자의 만점 예시 답 (사용자 정보와 무관, 없으면 빈칸)."""
     return {"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"],
-            "example": str(row["만점 예시"]).strip()}
+            "example": str(row["만점 예시"]).strip(),
+            "question_id": str(row["질문 ID"]).strip() if "질문 ID" in row and str(row["질문 ID"]).strip() else None}
 
 
 def past_result(report: dict, index: int) -> dict:
@@ -225,17 +227,17 @@ def overview_advice(best: dict) -> list[tuple[str, str]]:
     """종합 점검 안내 (고정 문장): 둘 다 합격선을 넘도록 비어 있거나 모자란 쪽을 권한다."""
     out = []
     if best["common"] is None:
-        out.append(("info", "공통 면접 기록이 없어요. 분야를 '공통' 으로 한 번 진행해 어느 회사에서나 나오는 일반 역량도 점검해 보세요."))
+        out.append(("info", "공통 면접 기록이 없어요. '공통 면접' 으로 한 번 진행해 어느 회사에서나 나오는 일반 역량도 점검해 보세요."))
     elif best["common"] < PASS_TOTAL:
         out.append(("warning", f"공통 면접 최고 {best['common']}점 · 합격선까지 {PASS_TOTAL - best['common']}점 남았어요. "
-                               "자기소개 · 협업 같은 일반 질문을 재도전과 암기로 다듬어 보세요."))
+                               "자기소개 · 협업 같은 일반 질문을 재도전으로 다듬어 보세요."))
     if best["field"] is None:
         out.append(("info", "분야 면접 기록이 없어요. 다음 회차는 지원할 회사의 분야를 골라 그 분야만의 특수 질문에 대비해 보세요."))
     elif best["field"] < PASS_TOTAL:
         out.append(("warning", f"분야 면접 최고 {best['field']}점 · 합격선까지 {PASS_TOTAL - best['field']}점 남았어요. "
                                "분야 질문은 회사 · 서비스 맥락을 넣어 답하면 점수가 잘 올라요."))
     if not out:
-        out.append(("success", f"공통 · 분야 면접 모두 합격선({PASS_TOTAL}점)을 넘었어요. 암기와 말하기 연습으로 실전 감각을 유지하세요."))
+        out.append(("success", f"공통 · 분야 면접 모두 합격선({PASS_TOTAL}점)을 넘었어요. 재도전으로 답을 계속 다듬으며 실전 감각을 유지하세요."))
     return out
 
 
@@ -321,15 +323,19 @@ def field_of(profile: dict) -> str:
     return profile.get("field") if profile.get("field") in FIELDS else DEFAULT_FIELD
 
 
-def build_context(profile: dict) -> str:
+NO_COMPANY = "회사 미지정"  # 회사를 정하지 않은 면접 (화면에서는 '기타' 그룹)
+
+
+def build_context(profile: dict, with_experience: bool = True) -> str:
+    """상황 블록. 평가 · 재도전 채점은 with_experience=False: 사전 입력 경험은 평가 근거로 쓰지 않는다 (PRD 0.3)."""
     field = field_of(profile)
     return CONTEXT.format(
-        company=profile["company"],
-        company_desc=profile["company_desc"],
+        company=profile.get("company") or NO_COMPANY,
+        company_desc=profile.get("company_desc") or "-",
         field=field,
         field_desc=FIELDS[field],
         job=profile["job"],
-        experience=profile["experience"],
+        experience=(profile.get("experience") or "(입력 없음)") if with_experience else "(평가에는 쓰지 않음)",
     )
 
 
@@ -358,7 +364,7 @@ def format_panel_criteria() -> str:
 
 
 def build_evaluator(profile: dict) -> str:
-    return EVALUATOR.format(panel_criteria=format_panel_criteria(), context=build_context(profile))
+    return EVALUATOR.format(panel_criteria=format_panel_criteria(), context=build_context(profile, with_experience=False))
 
 
 MAX_TIPS_PER_CRITERION = 2
@@ -830,7 +836,7 @@ def load_panel_rationale(path: Path = PANEL_RATIONALE_PATH) -> str:
 def build_retry(profile: dict, question: dict, before: str, weak: str) -> str:
     return RETRY.format(
         persona=persona_of(profile["job"], profile.get("persona_type"))["persona"],
-        context=build_context(profile),
+        context=build_context(profile, with_experience=False),
         question=question["question"],
         point=question["point"],
         before=before,
@@ -1299,7 +1305,7 @@ def session_data(
                 for a in evaluation["answers"]
             ],
             "next": evaluation["next"],
-        },
+        } if evaluation else None,  # 평가 전 · 평가 실패 회차 (v2 통합 저장)
         "retries": {str(no): {"answer": r["answer"], **r["scores"], "weak": r["weak"]} for no, r in retries.items()},
         "retry_history": {
             str(no): [{"attempt_id": r.get("attempt_id") or attempt_id(no, i), "answer": r["answer"], **r["scores"],
@@ -1396,9 +1402,10 @@ def _trim_attempt_lists(value) -> dict:
     return lists
 
 
-def _parse_session(raw) -> dict | None:
+def _parse_session(raw, allow_no_evaluation: bool = False) -> dict | None:
     """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가).
-    재도전 기록이 질문당 한도를 넘으면 ValueError (자르지 않고 거부)."""
+    재도전 기록이 질문당 한도를 넘으면 ValueError (자르지 않고 거부).
+    allow_no_evaluation: v2 의 평가 전 회차는 evaluation 이 null 이어도 읽는다."""
     if not isinstance(raw, dict):
         return None
     attempts = {key: _trim_attempt_lists(raw.get(key)) for key in ATTEMPT_LISTS if key in raw}
@@ -1415,7 +1422,7 @@ def _parse_session(raw) -> dict | None:
             "kind": "question" if m.get("kind") == "question" else None,
         })
     evaluation = raw.get("evaluation")
-    if not messages or not isinstance(evaluation, dict):
+    if not messages or not (isinstance(evaluation, dict) or (allow_no_evaluation and evaluation is None)):
         return None
     return {**raw, "messages": messages}
 
@@ -1475,7 +1482,10 @@ def rebuild_session(session: dict, questions: list[dict]) -> dict:
     problems: 복원하며 찾은 문제 (오류 기록 · 안내용) — evaluation: 평가 문제 코드, retry_unreadable: 읽지 못한 재도전 수."""
     evaluation_unreadable = [e for e in session.get("evaluation_unreadable") or [] if e is not None]         if isinstance(session.get("evaluation_unreadable"), list) else []
     try:
-        evaluation, evaluation_codes = checked_evaluation(session["evaluation"], questions), []
+        if session.get("evaluation") is None:  # 평가 전 · 평가 실패로 저장한 회차 (v2): 손상이 아니다
+            evaluation, evaluation_codes = None, []
+        else:
+            evaluation, evaluation_codes = checked_evaluation(session["evaluation"], questions), []
     except EvaluationInvalid as e:
         evaluation, evaluation_codes = None, e.codes
         evaluation_unreadable.append(session["evaluation"])
@@ -1883,8 +1893,10 @@ def build_report(
     latest_unscored: dict | None = None,
     retry_unreadable: dict | None = None,
     evaluation_unreadable: list | None = None,
+    v2_section: bool = False,
 ) -> str:
-    """면접리포트.md. 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
+    """면접리포트.md.
+    v2_section=True: v2 통합 저장 파일 안의 회차 한 칸 (단계 체크리스트 · 사전 정보 · 회차별 숨은 데이터 없이 사람이 읽는 본문만). 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
     AI가 쓴 글은 'AI 의견' 으로 구분해 넣는다. 끝에는 이 회차의 이어 하기 데이터를 숨겨 둔다.
     day 는 사용자 시간대의 오늘 (배포 서버 날짜는 UTC 라서 하루 다를 수 있다)."""
@@ -1904,11 +1916,11 @@ def build_report(
         "> 점수는 모두 앱이 계산한 값이에요. **AI 의견** 표시가 붙은 글은 AI가 쓴 것이라 사실인지 직접 확인해 주세요.",
         "",
         # 리포트 파일이 곧 '리포트 받기' 라서 7단계는 완료로 적는다
-        *checklist_report_lines(report_checklist(
+        *([] if v2_section else checklist_report_lines(report_checklist(
             messages, evaluation, clue_status(evaluation, retries, retry_counts or {}, clue_set, clue_round),
             verdict_open, memo, last_suggest, last_question, precheck_items, precheck, report_done=True,
             retries=retries, retry_history=retry_history,
-        )),
+        ))),
         "## 1. 점수",
         "",
         "### 위원 평가 (0~10)",
@@ -2041,6 +2053,8 @@ def build_report(
                 lines += ["", f"원래 질문에서 빠진 것: {last_question['why']}"]
 
     precheck = precheck or {}
+    if v2_section:
+        return "\n".join(lines) + "\n"
     if precheck_items:
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
@@ -2092,3 +2106,386 @@ def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
         "answers": answers,
         "next": [str(n) for n in raw.get("next", [])][:MAX_NEXT],
     }
+
+
+# ── 면접 기록 보관 (MVP1): 회사(또는 '기타') → 직군 → 회차 ─────────────────
+# 회차 레코드 하나 = 한 번의 면접 (질문 · 최초 답 · 평가 · 재도전 기록). 화면의 작업 상태는 지금 고른 회차 하나를 펼친 것이다.
+# 회사 · 회차 ID 생성 방식은 PRD 10.2 미확정 — 아래는 임시 규칙: 같은 입력이면 같은 ID (반복 업로드에 중복 생성 · 덮어쓰기가 없게).
+OTHER_GROUP = "기타"  # 회사를 정하지 않은 회차의 화면 그룹. 실제 회사명 '기타'(company_key '기타')와는 company_key 가 None 인지로 구분
+STORE_VERSION = 2
+MAX_STORE_ROUNDS = 500  # v2 파일 하나의 회차 수 안전 한도 (넘으면 일부만 읽지 않고 거부)
+INTERVIEW_TYPES = {"common": "공통 면접", "field": "분야별 면접"}
+# 회차 레코드의 작업 데이터 칸 (화면 상태와 같은 이름)
+ROUND_STATE_KEYS = (
+    "messages", "evaluation", "retries", "retry_history", "retry_counts", "retry_pending", "retry_unreadable",
+    "evaluation_unreadable", "understanding", "last_suggest", "last_question", "clue_set", "clue_round",
+    "verdict_open", "q_index", "follow_ups", "pending_answer",
+)
+
+
+def company_key(name) -> str | None:
+    """같은 회사 판단 키: 회사명의 앞뒤 공백만 뺀다 (중간 공백 · 대소문자는 그대로). 비어 있으면 None = 회사 미지정."""
+    key = str(name or "").strip()
+    return key or None
+
+
+def company_id_for(key: str | None) -> str | None:
+    """회사 ID (임시 규칙: company_key 로 만든 고정 값). 회사 미지정이면 None."""
+    return "c" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12] if key else None
+
+
+def new_round_id() -> str:
+    return "r" + uuid.uuid4().hex[:16]
+
+
+def interview_type_of(field: str) -> str:
+    """면접 유형: 분야 '공통' 이면 공통 면접, 아니면 분야별 면접 (회차를 나누는 기준이 아니다)."""
+    return "common" if field == DEFAULT_FIELD else "field"
+
+
+def group_name(record: dict) -> str:
+    return record.get("company_name") or OTHER_GROUP
+
+
+def same_group(record: dict, key: str | None, job: str) -> bool:
+    return record.get("company_key") == key and record.get("job") == job
+
+
+def group_rounds(rounds: list[dict], key: str | None, job: str) -> list[dict]:
+    """회사(또는 '기타') + 직군의 회차들 (회차 번호 · 날짜 순)."""
+    return sorted((r for r in rounds if same_group(r, key, job)), key=lambda r: (r["round_number"], r.get("date", "")))
+
+
+def next_round_number(rounds: list[dict], key: str | None, job: str) -> int:
+    """회차 번호: 회사(또는 '기타') + 직군 안에서 누적 (공통 · 분야별 면접이 같은 번호 체계, 재도전으로 늘지 않는다)."""
+    return min(max((r["round_number"] for r in rounds if same_group(r, key, job)), default=0) + 1, MAX_ROUND)
+
+
+def new_round(rounds: list[dict], *, company_name: str, company_desc: str, job: str, field: str, question_mode: str,
+              nickname: str, experience: str, questions: list[dict], day: date) -> dict:
+    """새 면접 회차 레코드 (면접 시작 때 만든다 · 아직 진행 중)."""
+    key = company_key(company_name)
+    return {
+        "round_id": new_round_id(),
+        "round_number": next_round_number(rounds, key, job),
+        "company_key": key,
+        "company_id": company_id_for(key),
+        "company_name": key or "",
+        "company_desc": (company_desc or "").strip(),
+        "job": job,
+        "field": field,
+        "interview_type": interview_type_of(field),
+        "question_mode": question_mode,
+        "date": day.isoformat(),
+        "nickname": nickname,
+        "experience": (experience or "").strip(),
+        "questions": questions,
+        "stage": "interview",
+        "messages": [], "evaluation": None, "retries": {}, "retry_history": {}, "retry_counts": {}, "retry_pending": {},
+        "retry_unreadable": {}, "evaluation_unreadable": [], "understanding": None, "last_suggest": None,
+        "last_question": None, "clue_set": None, "clue_round": 1, "verdict_open": False, "q_index": 0, "follow_ups": 0,
+        "pending_answer": None, "extra": {},
+    }
+
+
+def round_profile(record: dict) -> dict:
+    """회차의 지원 정보 (프롬프트 상황 블록 · 리포트가 쓰는 profile 모양)."""
+    return {"name": record.get("nickname") or "지원자", "field": record.get("field", DEFAULT_FIELD), "job": record["job"],
+            "company": record.get("company_name") or "", "company_desc": record.get("company_desc") or "",
+            "experience": record.get("experience") or "", "persona_type": None}
+
+
+def _raw_attempt(r: dict) -> dict:
+    return {"attempt_id": r.get("attempt_id"), "answer": r["answer"], **r["scores"], "weak": r["weak"]}
+
+
+def round_as_report(record: dict) -> dict:
+    """회차 레코드 → 지난 회차 비교 · 질문별 기록 · 회차 종합이 읽는 리포트 모양 (parse_report 결과와 같은 칸).
+    평가가 없는 회차는 scores 가 비어 있다 (옛 리포트 요약 회차는 저장된 점수를 쓴다)."""
+    ev = record.get("evaluation")
+    totals = total_scores(ev, record.get("retries") or {}) if ev else None
+    summary = record.get("summary") or {}
+    return {
+        "round": record["round_number"],
+        "date": record.get("date", ""),
+        "profile": round_profile(record),
+        "questions": [q["question"] for q in record.get("questions") or []],
+        "scores": [a["score"] for a in ev["answers"]] if ev else list(summary.get("scores") or []),
+        "panel_average": ev["panel_average"] if ev else float(summary.get("panel_average") or 0.0),
+        "total_latest": totals["latest"] if totals else summary.get("total_latest"),
+        "criteria_version": criteria_version() if ev else summary.get("criteria_version", ""),
+        "next": ev["next"] if ev else list(summary.get("next") or []),
+        "precheck": {},
+        "session": {
+            "messages": record.get("messages") or [],
+            "retry_history": {str(no): [_raw_attempt(r) for r in h] for no, h in (record.get("retry_history") or {}).items()},
+            **{k: v for k, v in (record.get("extra") or {}).items() if k in ("practice", "past_hidden")},
+        } if record.get("messages") else None,
+    }
+
+
+def previous_evaluated(rounds: list[dict], record: dict) -> dict | None:
+    """같은 회사(또는 '기타') · 직군에서 이 회차 바로 앞의 평가 있는 회차 (지난 면접과 비교용)."""
+    before = [r for r in group_rounds(rounds, record.get("company_key"), record["job"])
+              if r["round_number"] < record["round_number"]
+              and (r.get("evaluation") or (r.get("summary") or {}).get("scores"))]
+    return before[-1] if before else None
+
+
+def round_status(record: dict) -> str:
+    if record.get("stage") == "summary":
+        return "결과 요약만 (옛 리포트)"
+    if record.get("stage") != "done":
+        return "면접 진행 중"
+    return "평가 완료" if record.get("evaluation") else "평가 전"
+
+
+def _round_data(record: dict) -> dict:
+    """v2 파일에 남기는 회차 하나 (복원용 데이터)."""
+    data = {k: record.get(k) for k in ("round_id", "round_number", "company_id", "company_name", "company_key",
+                                       "company_desc", "job", "field", "interview_type", "question_mode", "date",
+                                       "experience")}
+    data["questions"] = [{k: q.get(k) for k in ("question_id", "type", "question", "point", "field")}
+                         for q in record.get("questions") or []]
+    if record.get("stage") == "summary":
+        data.update(status="summary", summary=record.get("summary") or {})
+        return data
+    extra = record.get("extra") or {}
+    data["status"] = "evaluated" if record.get("evaluation") else "evaluation_pending"
+    data["session"] = session_data(
+        record["messages"], record.get("evaluation"), record.get("retries") or {}, record.get("retry_counts") or {},
+        record.get("last_suggest"), record.get("last_question"), record.get("understanding"),
+        record.get("retry_history") or {}, record.get("clue_set"), record.get("clue_round") or 1,
+        extra.get("practice") or [], extra.get("past_hidden") or [], record.get("retry_pending") or {},
+        record.get("retry_unreadable") or {}, record.get("evaluation_unreadable") or [],
+    )
+    if extra.get("precheck"):
+        data["extra"] = {"precheck": extra["precheck"]}  # 옛 리포트의 사전 정보 탐색 기록 (화면에는 없지만 지우지 않는다)
+    return data
+
+
+def savable_rounds(rounds: list[dict]) -> list[dict]:
+    """파일에 남기는 회차: 면접을 마친 회차 (진행 중 면접의 저장 · 재개는 PRD 10.2 미확정이라 넣지 않는다)."""
+    return [r for r in rounds if r.get("stage") in ("done", "summary")]
+
+
+def store_data(rounds: list[dict], nickname: str, saved_at: str) -> dict:
+    kept = savable_rounds(rounds)
+    companies = {}
+    for r in kept:
+        if r.get("company_key"):
+            companies.setdefault(r["company_key"], {"company_id": r["company_id"], "company_name": r["company_name"],
+                                                    "company_key": r["company_key"]})
+    return {"version": STORE_VERSION, "nickname": nickname, "saved_at": saved_at,
+            "companies": list(companies.values()), "rounds": [_round_data(r) for r in kept]}
+
+
+def store_fingerprint(rounds: list[dict], nickname: str) -> str:
+    """저장 상태 확인용: 파일에 들어갈 내용이 같으면 같은 값 (저장 시각은 빼고 비교)."""
+    payload = json.dumps(store_data(rounds, nickname, ""), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def round_section(record: dict, rounds: list[dict], day: date) -> str:
+    """v2 파일의 회차 본문 (사람이 읽는 부분). 평가가 있으면 기존 리포트 본문, 없으면 질문 · 답만."""
+    profile = round_profile(record)
+    group = f"{group_name(record)} · {record['job']} · {record['round_number']}회차"
+    if record.get("evaluation"):
+        prev = previous_evaluated(rounds, record)
+        body = build_report(
+            profile, record["questions"], record["evaluation"], record.get("retries") or {}, record["messages"],
+            record.get("last_suggest"), record.get("last_question"), round_as_report(prev) if prev else None,
+            record["round_number"], None, None, None,
+            date.fromisoformat(record["date"]) if record.get("date") else day,
+            retry_counts=record.get("retry_counts"), understanding=record.get("understanding"),
+            retry_history=record.get("retry_history") or {}, clue_set=record.get("clue_set"),
+            clue_round=record.get("clue_round") or 1, v2_section=True,
+        )
+        return body.replace(f"# 면접 리포트 · {record['round_number']}회차", f"## {group}", 1)
+    lines = [f"## {group}", "", f"- 상태: {round_status(record)}", f"- 날짜: {record.get('date', '')}", ""]
+    for i, q in enumerate(record.get("questions") or []):
+        lines += [f"### 질문 {i + 1}. {q['question']}", ""]
+        if record.get("messages"):
+            lines += ["**내 답**", "", *_quote(answer_text(record["messages"], i) or "(답 없음)"), ""]
+    if record.get("stage") == "summary":
+        scores = (record.get("summary") or {}).get("scores") or []
+        lines += ["- 점수 (옛 리포트 요약): " + " · ".join(map(str, scores)), ""]
+    return "\n".join(lines)
+
+
+def build_store_file(rounds: list[dict], nickname: str, saved_at: str, day: date) -> str:
+    """Markdown v2 통합 저장: 여러 회사 · 직군 · 회차를 파일 하나에 (사람이 읽는 본문 + interview-data version 2)."""
+    kept = savable_rounds(rounds)
+    lines = ["# 역전 취업 코칭 — 면접 기록", "", f"- 닉네임: {nickname}", f"- 저장 시각: {saved_at}",
+             f"- 회차 {len(kept)}개", "",
+             "> 점수는 모두 앱이 계산한 값이에요. **AI 의견** 표시가 붙은 글은 AI가 쓴 것이라 사실인지 직접 확인해 주세요.", ""]
+    order = sorted(kept, key=lambda r: (r.get("company_key") is None, r.get("company_key") or "", r["job"],
+                                        r["round_number"]))
+    for record in order:
+        lines += [round_section(record, rounds, day), ""]
+    lines.append(embed_report_data(store_data(rounds, nickname, saved_at)))
+    return "\n".join(lines) + "\n"
+
+
+def store_file_name(day: date) -> str:
+    return f"{day.strftime('%y%m%d')}-역전취업코칭-면접기록.md"
+
+
+def _bank_questions(bank: pd.DataFrame | None, job: str, texts: list[str], field: str) -> list[dict]:
+    """질문 글 → 질문 은행의 질문 (question_id 포함). 은행에 없는 과거 질문은 글을 그대로 남기고 question_id 는 비워 둔다
+    (ID 매핑 실패 처리 방식은 PRD 10.2 미확정 — 보존 · 재도전 허용은 확정)."""
+    rows = []
+    for text in texts:
+        found = None
+        if bank is not None:
+            hit = bank[bank["직군"].isin(["공통", job]) & (bank["질문"] == text)]
+            found = question_row(hit.iloc[0]) if not hit.empty else None
+        rows.append(found or {"type": "", "question": text, "point": "", "field": field, "example": "",
+                              "question_id": None})
+    return rows
+
+
+def _record_from_session(base: dict, session: dict | None, questions: list[dict]) -> tuple[dict, dict]:
+    """복원: 회차 기본 칸 + session → 회차 레코드 (평가 · 재도전은 E-3 검증 · E-5 부분 복원 규칙 그대로)."""
+    record = {**base, "questions": questions, "extra": {}}
+    if session is None:
+        empty = {k: v for k, v in new_round([], company_name="", company_desc="", job=base["job"], field=base["field"],
+                                             question_mode="", nickname="", experience="", questions=[],
+                                             day=date.today()).items() if k in ROUND_STATE_KEYS}
+        return {**record, **empty, "stage": "summary"}, {"evaluation": [], "retry_codes": [], "retry_unreadable": 0}
+    s = rebuild_session(session, questions)
+    record.update({
+        "stage": "done", "messages": s["messages"], "evaluation": s["evaluation"], "retries": s["retries"],
+        "retry_history": s["retry_history"], "retry_counts": s["retry_counts"], "retry_pending": dict(s["latest_unscored"]),
+        "retry_unreadable": s["retry_unreadable"], "evaluation_unreadable": s["evaluation_unreadable"],
+        "understanding": s["understanding"], "last_suggest": s["last_suggest"], "last_question": s["last_question"],
+        "clue_set": s["clue_set"], "clue_round": s["clue_round"], "verdict_open": False,
+        "q_index": TOTAL_QUESTIONS, "follow_ups": 0, "pending_answer": None,
+    })
+    record["extra"] = {k: session[k] for k in ("practice", "past_hidden") if session.get(k)}
+    return record, s["problems"]
+
+
+def v1_round_id(parsed: dict) -> str:
+    """v1 파일의 회차 ID (임시 규칙: 회사 · 직군 · 회차 · 날짜 · 질문으로 만든 고정 값 — 같은 파일은 늘 같은 ID)."""
+    p = parsed["profile"]
+    basis = json.dumps([company_key(p["company"]), p["job"], parsed["round"], parsed["date"], parsed["questions"]],
+                       ensure_ascii=False)
+    return "v1" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _from_v1(text: str, bank: pd.DataFrame | None) -> list[tuple[dict, dict]]:
+    parsed = parse_report(text)
+    p = parsed["profile"]
+    key = company_key(p["company"])
+    questions = _bank_questions(bank, p["job"], parsed["questions"], p["field"])
+    base = {
+        "round_id": v1_round_id(parsed), "round_number": parsed["round"], "company_key": key,
+        "company_id": company_id_for(key), "company_name": key or "", "company_desc": p["company_desc"],
+        "job": p["job"], "field": p["field"], "interview_type": interview_type_of(p["field"]), "question_mode": "",
+        "date": parsed["date"], "nickname": p["name"], "experience": p["experience"],
+        "summary": {"scores": parsed["scores"], "panel_average": parsed["panel_average"],
+                    "total_latest": parsed["total_latest"], "criteria_version": parsed["criteria_version"],
+                    "next": parsed["next"]},
+    }
+    record, problems = _record_from_session(base, parsed["session"], questions)
+    if parsed["precheck"]:
+        record["extra"]["precheck"] = parsed["precheck"]
+    return [(record, problems)]
+
+
+def _from_v2(raw: dict, bank: pd.DataFrame | None) -> list[tuple[dict, dict]]:
+    out = []
+    for item in raw.get("rounds") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("round_id"), str) or item.get("job") not in JOBS:
+            raise ValueError("면접 기록 파일의 회차 데이터를 읽지 못했어요.")
+        key = company_key(item.get("company_key") or item.get("company_name"))
+        field = item.get("field") if item.get("field") in FIELDS else DEFAULT_FIELD
+        questions = []
+        for q in item.get("questions") or []:
+            q = q if isinstance(q, dict) else {}
+            text = _text(q.get("question"), "question")
+            matched = _bank_questions(bank, item["job"], [text], field)[0]
+            questions.append({**matched, "question_id": q.get("question_id") or matched["question_id"],
+                              "type": q.get("type") or matched["type"], "point": q.get("point") or matched["point"],
+                              "field": q.get("field") or matched["field"]})
+        if len(questions) != TOTAL_QUESTIONS:
+            raise ValueError("면접 기록 파일의 질문 데이터를 읽지 못했어요.")
+        number = item.get("round_number")
+        base = {
+            "round_id": item["round_id"][:40],
+            "round_number": clamp(number, 1, MAX_ROUND) if isinstance(number, int) else 1,
+            "company_key": key, "company_id": item.get("company_id") or company_id_for(key), "company_name": key or "",
+            "company_desc": _text(item.get("company_desc") or "", "company_desc"), "job": item["job"], "field": field,
+            "interview_type": interview_type_of(field), "question_mode": str(item.get("question_mode") or "")[:20],
+            "date": _text(item.get("date") or "", "date"), "nickname": _text(raw.get("nickname") or "", "nickname"),
+            "experience": _text(item.get("experience") or "", "experience"),
+            "summary": item.get("summary") if isinstance(item.get("summary"), dict) else {},
+        }
+        if item.get("status") == "summary":
+            record, problems = _record_from_session(base, None, questions)
+        else:
+            session = _parse_session(item.get("session"), allow_no_evaluation=True)
+            if session is None:
+                raise ValueError("면접 기록 파일의 대화 데이터를 읽지 못했어요.")
+            record, problems = _record_from_session(base, session, questions)
+        if isinstance(item.get("extra"), dict) and isinstance(item["extra"].get("precheck"), dict):
+            record["extra"]["precheck"] = item["extra"]["precheck"]
+        out.append((record, problems))
+    return out
+
+
+def parse_store_file(text: str, bank: pd.DataFrame | None = None) -> dict:
+    """불러오기: v1(회차 하나) · v2(통합) 파일 → {"version", "nickname", "rounds": [(레코드, 문제)]}.
+    문제가 있으면 한국어 한 줄로 ValueError (파일은 바꾸지 않는다). 손상된 평가 · 재도전은 E-5 규칙으로 부분 복원한다."""
+    if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError(f"리포트 파일이 너무 커서 불러오지 않았어요 ({MAX_REPORT_BYTES // (1024 * 1024)}MB 초과).")
+    found = REPORT_DATA_RE.search(text)
+    if not found:
+        raise ValueError("이 파일에는 복원할 데이터가 없어요. 이 앱에서 받은 면접 기록 파일(.md)을 올려 주세요.")
+    try:
+        raw = json.loads(found.group(1))
+    except json.JSONDecodeError:
+        raise ValueError("리포트의 이어 하기 데이터가 깨져 있어요.") from None
+    if isinstance(raw, dict) and raw.get("version") == STORE_VERSION:
+        if not isinstance(raw.get("rounds"), list) or len(raw["rounds"]) > MAX_STORE_ROUNDS:
+            raise ValueError("지원하지 않는 리포트 형식이에요.")
+        return {"version": 2, "nickname": str(raw.get("nickname") or "")[:40], "rounds": _from_v2(raw, bank)}
+    rounds = _from_v1(text, bank)  # version 1 이 아니면 parse_report 가 '지원하지 않는 형식' 으로 거부
+    return {"version": 1, "nickname": rounds[0][0].get("nickname", ""), "rounds": rounds}
+
+
+# ── 질문 출제: '똑같은 질문 — 과거 출제 질문에서 무작위 구성' (IA 4.1) ──
+RANDOM_NEED = {"common": (TOTAL_QUESTIONS, 0), "field": (2, 3)}  # (서로 다른 공통 질문 수, 이 분야 질문 수)
+
+
+def random_past_ready(interview_type: str, common_pool: list[dict], field_pool: list[dict]) -> bool:
+    """과거 질문 무작위 구성 조건: 공통 면접은 공통 질문 5개 이상, 분야별 면접은 공통 2개 + 분야 3개 이상."""
+    need_common, need_field = RANDOM_NEED[interview_type]
+    return len(common_pool) >= need_common and len(field_pool) >= need_field
+
+
+def random_past_questions(common_pool: list[dict], field_pool: list[dict], interview_type: str, rng=None) -> list[dict]:
+    """이 회사 · 직군에서 나온 질문으로 5개를 무작위로 (자기소개가 뽑히면 첫 자리). 조건은 random_past_ready."""
+    import random
+    rng = rng or random
+    need_common, need_field = RANDOM_NEED[interview_type]
+    picked = rng.sample(common_pool, need_common) + rng.sample(field_pool, need_field)
+    picked.sort(key=lambda q: "자기소개" not in q["question"])
+    return [dict(q) for q in picked]
+
+
+def record_from_mock(mock: dict, bank: pd.DataFrame | None) -> tuple[dict, dict]:
+    """개발용 모의 데이터(load_mock) → 회차 레코드 (v1 리포트와 같은 길)."""
+    p = mock["profile"]
+    key = company_key(p.get("company"))
+    field = field_of(p)
+    texts = [q if isinstance(q, str) else q.get("question", "") for q in mock.get("questions") or []]
+    base = {
+        "round_id": "mock-" + hashlib.sha1(json.dumps(texts, ensure_ascii=False).encode("utf-8")).hexdigest()[:12],
+        "round_number": clamp(mock.get("round", 1), 1, MAX_ROUND), "company_key": key, "company_id": company_id_for(key),
+        "company_name": key or "", "company_desc": p.get("company_desc", ""), "job": p["job"], "field": field,
+        "interview_type": interview_type_of(field), "question_mode": "", "date": str(mock.get("date") or date.today()),
+        "nickname": p.get("name", ""), "experience": p.get("experience", ""), "summary": {},
+    }
+    return _record_from_session(base, mock["session"], _bank_questions(bank, p["job"], texts, field))

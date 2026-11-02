@@ -98,12 +98,11 @@ class InterviewerResponseTest(unittest.TestCase):
         self.assertEqual((r["finished"], r["follow_ups"]), (True, [1, 0, 0, 0, 0]))
         self.assertNotIn(replies[1]["reply"], r["shown"])
 
-    def test_feedback_every_question(self):
-        """피드백형: 질문마다 꼬리 질문 1개 + 피드백. 피드백에 follow_up true 가 와도 보여 준다."""
-        replies = sequence("feedback_every_question")
-        r = simulate_interview({"job": "디자인", "persona_type": "프로덕트 디자인 리드"}, replies)
-        self.assertEqual((r["finished"], r["used"], r["follow_ups"]), (True, 10, [1] * 5))
-        self.assertIn(replies[-1]["reply"], r["shown"])
+    def test_removed_feedback_type_falls_back_to_probe(self):
+        """예전 피드백형 이름이 와도 대표 면접관(답이 부족할 때만 꼬리 질문)으로 진행한다 (MVP1 단일 면접관)."""
+        r = simulate_interview({"job": "디자인", "persona_type": "프로덕트 디자인 리드"}, sequence("probe_one_follow_up"))
+        self.assertTrue(r["finished"])
+        self.assertLessEqual(max(r["follow_ups"]), coach.MAX_FOLLOW_UPS)
 
     def test_understanding_clamped(self):
         self.assertEqual(coach.clamp(response("interviewer", "understanding_out_of_range")["understanding"], 0, 100), 100)

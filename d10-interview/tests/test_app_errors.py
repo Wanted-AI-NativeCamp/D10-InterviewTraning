@@ -60,11 +60,20 @@ class AppErrorCase(unittest.TestCase):
         self.no_exception()
 
     def start_interview(self):
+        """시작 화면 → [+ 새 면접 시작] → 면접 정보 설정 (회사 · 내 경험은 선택이지만 기록 검사용으로 채운다) → 면접 시작."""
         self.at.button(key="title_new").click().run()
-        for key, value in PROFILE.items():
-            (self.at.text_area if key == "f_experience" else self.at.text_input)(key=key).input(value)
-        self.click("면접 시작하기")
-        self.click("면접을 시작하겠습니다")
+        self.at.text_input(key="f_company").input(PROFILE["f_company"])
+        self.at.text_input(key="f_company_desc").input(PROFILE["f_company_desc"])
+        self.at.text_area(key="f_experience").input(PROFILE["f_experience"])
+        self.at.button(key="setup_start").click().run()
+        self.no_exception()
+
+    def to_retry(self):
+        """평가 뒤 [평가 확인하기] → 면접 상세의 LNB '재도전 (전체)'."""
+        if self.at.session_state["page"] == "interview":
+            self.click("평가 확인하기")
+        self.at.segmented_control(key="lnb").set_value(":material/replay: 재도전 (전체)").run()
+        self.no_exception()
 
     def finish_interview(self):
         for i in range(6):
@@ -121,7 +130,7 @@ class CallAiErrorTest(AppErrorCase):
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [err]})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNone(self.at.session_state["evaluation"])
         [event] = self.events()
         self.assert_event(event, "api_server", "evaluation", http_status=503, exception="InternalServerError")
@@ -134,7 +143,8 @@ class CallAiErrorTest(AppErrorCase):
                        "retry": [retry_err], "strategy": [strat_err]})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
+        self.to_retry()
         no = self.at.selectbox(key="retry_no").value
         self.at.text_area(key=f"retry_answer_{no}").input("다시 쓴 답")
         self.click("다시 채점")
@@ -158,8 +168,8 @@ class SessionIdTest(AppErrorCase):
             self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [err, err]})
             self.start_interview()
             self.finish_interview()
-            self.click("위원 4명에게 평가받기")
-            self.click("위원 4명에게 평가받기")
+            self.click("평가 받기")
+            self.click("평가 받기")
         first, second = self.events()
         self.assertEqual(first["session_id"], second["session_id"])
         self.assertEqual(maker.call_count, 1)
@@ -177,9 +187,9 @@ class LoggingFailureTest(AppErrorCase):
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [err, response("evaluation", "perfect")]})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")          # 실패 + 기록 실패
+        self.click("평가 받기")          # 실패 + 기록 실패
         self.assertIn("AI 응답을 받지 못했어요", " ".join(e.value for e in self.at.error))
-        self.click("위원 4명에게 평가받기")          # 다시 누르면 정상 평가
+        self.click("평가 받기")          # 다시 누르면 정상 평가
         self.assertEqual(self.at.session_state["evaluation"]["answers"][0]["score"], 20)
 
 
@@ -198,10 +208,10 @@ class ValidationFailureTest(AppErrorCase):
                                       response("evaluation", "mixed")]})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNone(self.at.session_state["evaluation"])  # 0점 채운 평가가 저장되지 않음
         self.assertIn(self.MSG_EVAL, self.errors())
-        self.assertTrue([b for b in self.at.button if "위원 4명에게 평가받기" in b.label])  # 다시 평가받기 버튼이 남음
+        self.assertTrue([b for b in self.at.button if "평가 받기" in b.label])  # 다시 평가받기 버튼이 남음
         first, event = self.events()  # E-4A: 자동 재시도 1회 뒤 최종 실패 (1회차 retrying · 2회차 failed)
         self.assertEqual((first["attempt"], first["status"]), (1, "retrying"))
         self.assertEqual((event["error_type"], event["source"], event["attempt"], event["status"]),
@@ -211,7 +221,7 @@ class ValidationFailureTest(AppErrorCase):
         self.assertNotIn("question_no", event["meta"])
         self.assert_no_private_text()
 
-        self.click("위원 4명에게 평가받기")  # 다시 누르면 정상 평가 저장
+        self.click("평가 받기")  # 다시 누르면 정상 평가 저장
         ev = self.at.session_state["evaluation"]
         self.assertEqual([m["role"] for m in ev["panel"]], coach.PANEL_ROLES)
         self.assertEqual(len(self.events()), 2)
@@ -223,7 +233,8 @@ class ValidationFailureTest(AppErrorCase):
         fake = llm.ask_json
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
+        self.to_retry()
         no = self.at.selectbox(key="retry_no").value
         self.at.text_area(key=f"retry_answer_{no}").input("다시 쓴 답 하나")
         self.click("다시 채점")                       # 정상 채점 → 기록 1개 · 최고 점수 반영
@@ -267,9 +278,10 @@ class PerfectHintsDisplayTest(AppErrorCase):
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [raw]})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertEqual(self.at.session_state["evaluation"]["answers"][0]["check"],
                          ["확인 가", "확인 나", "확인 다", "확인 라"])
+        self.to_retry()  # 만점 힌트는 재도전 (전체) 의 역전의 실마리 자리
         self.click("힌트 확인하기")
         [more] = [e for e in self.at.expander if e.label.startswith("더 보기")]
         self.assertEqual(more.label, "더 보기 · 2개")
@@ -284,27 +296,16 @@ class StaticCheckTest(unittest.TestCase):
     def test_ai_scores_go_through_validation(self):
         """AI 응답 저장 3곳은 검증 함수를 쓰고, 보정 함수(summarize_*)는 app.py 에서 쓰지 않는다."""
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count("coach.checked_retry(raw)"), 2)
+        self.assertEqual(source.count("coach.checked_retry(raw)"), 1)  # 재도전 (전체) 한 곳 (암기 탭은 제외 기능이라 없앴다)
         self.assertEqual(source.count("coach.checked_evaluation(raw, state.questions)"), 1)
         self.assertNotIn("summarize_retry", source)
         self.assertNotIn("summarize_evaluation", source)
 
-    def test_memo_store_validates_before_saving(self):
-        """암기 탭 재도전 검토: store 의 첫 문장이 검증 → 실패하면 고친 대본 · 기록 · 횟수를 건드리지 않는다."""
-        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-        dialog = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "script_dialog")
-        store = next(n for n in ast.walk(dialog) if isinstance(n, ast.FunctionDef) and n.name == "store")
-        self.assertIn("checked_retry", ast.unparse(store.body[0]))
-        later = "\n".join(ast.unparse(s) for s in store.body[1:])
-        self.assertIn("state.memo_edits[result_key] = new_answer", later)
-        self.assertNotIn("checked_retry", later)
-    """새 AI 호출을 추가하고 error_log 에 등록하지 않으면 실패한다."""
-
     def test_every_ai_call_name_is_a_source(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         names = set(re.findall(r'_SCHEMA,\s*"([a-z_]+)"', source))
-        self.assertEqual(names, {"interviewer", "evaluation", "retry", "highlight", "strategy",
-                                 "last_question", "last_suggest"})
+        # 마지막에 할 질문은 MVP1 IA 에 없어 화면에서 뺐다 (기록 코드는 error_log 에 남는다)
+        self.assertEqual(names, {"interviewer", "evaluation", "retry", "highlight", "strategy"})
         self.assertLessEqual(names, error_log.SOURCES)
         self.assertIn('"interviewer", container=live', source)  # 면접관도 run_ai 로 기록 (E-4A)
         self.assertIn("name, question_no)", source)              # call_ai → run_ai(..., name, question_no)
@@ -325,7 +326,7 @@ class StaticCheckTest(unittest.TestCase):
     def test_session_id_not_kept_across_reset(self):
         """reset() 이 보존하는 키에 error_session_id 가 없다 → 새 면접 세션에서 새 ID."""
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        reset_body = source[source.index("def reset("):source.index("st.session_state.clear()")]
+        reset_body = source[source.index("def reset_app("):source.index("st.session_state.clear()")]
         self.assertNotIn("error_session_id", reset_body)
 
 

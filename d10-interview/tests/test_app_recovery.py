@@ -168,7 +168,7 @@ class EvaluationRecoveryTest(RecoveryCase):
 
     def test_validation_auto_retry_recovers(self):
         self.finish([response("evaluation", "missing_role"), response("evaluation", "mixed")])
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNotNone(self.at.session_state["evaluation"])
         self.assertEqual([e.value for e in self.at.error], [])
         self.assertEqual(self.statuses(), [("eval_validation", "evaluation", 1, "retrying"),
@@ -177,14 +177,14 @@ class EvaluationRecoveryTest(RecoveryCase):
 
     def test_parse_auto_retry_recovers(self):
         self.finish([PARSE, response("evaluation", "perfect")])
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertEqual(self.at.session_state["evaluation"]["answers"][0]["score"], 20)
         self.assertEqual([s[3] for s in self.statuses()], ["retrying", "recovered"])
 
     def test_final_failure_keeps_button(self):
         self.finish([response("evaluation", "missing_role"), response("evaluation", "zero_based_numbers"),
                      response("evaluation", "mixed")])
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNone(self.at.session_state["evaluation"])
         self.assertIn("평가 결과를 확인하지 못했어요", " ".join(e.value for e in self.at.error))
         first, second = self.events()
@@ -192,7 +192,7 @@ class EvaluationRecoveryTest(RecoveryCase):
         self.assertEqual((second["attempt"], second["status"]), (2, "failed"))
         self.assertIn("panel_role_missing:recruiter", first["codes"])
         self.assertIn("answer_no_range:answers[0]=0", second["codes"])
-        self.click("위원 4명에게 평가받기")                           # 다시 평가받기 가능
+        self.click("평가 받기")                           # 다시 평가받기 가능
         self.assertIsNotNone(self.at.session_state["evaluation"])
         self.assertEqual(len(self.calls("evaluation")), 3)
         self.assert_no_private_text()
@@ -206,7 +206,7 @@ class EvaluationRecoveryTest(RecoveryCase):
             with self.subTest(kind=e.kind):
                 self.log.truncate(0), self.log.seek(0)
                 self.finish([e, response("evaluation", "mixed")])
-                self.click("위원 4명에게 평가받기")
+                self.click("평가 받기")
                 self.assertIsNone(self.at.session_state["evaluation"])
                 self.assertEqual(len(self.calls("evaluation")), 1)
                 self.assertEqual(self.statuses(), [(e.kind, "evaluation", 1, "failed")])
@@ -219,7 +219,8 @@ class RetryScoringRecoveryTest(RecoveryCase):
                        "retry": retries})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
+        self.to_retry()
         no = self.at.selectbox(key="retry_no").value
         self.at.text_area(key=f"retry_answer_{no}").input("다시 쓴 답").run()
         return no
@@ -246,9 +247,8 @@ class RetryScoringRecoveryTest(RecoveryCase):
 
         other = next(n for n in range(1, coach.TOTAL_QUESTIONS + 1) if n != no)  # 값은 질문 번호 (보이는 글은 라벨)
         self.at.selectbox(key="retry_no").set_value(other).run()      # 다른 질문으로 갔다가
-        # Streamlit 은 그리지 않은 칸의 값을 실행이 끝날 때 지운다. 지금 앱은 끝난 면접 화면이 st.stop() 으로 끝나
-        # 정리가 건너뛰어지지만 (우연), 그 동작에 기대지 않도록 칸 값이 지워진 상황을 직접 만든다
-        del self.at.session_state[f"retry_answer_{no}"]
+        # Streamlit 은 그리지 않은 칸의 값을 실행이 끝날 때 지운다 → 보관한 답(retry_pending)으로 다시 채워야 한다
+        self.assertNotIn(f"retry_answer_{no}", self.at.session_state)
         self.at.selectbox(key="retry_no").set_value(no).run()         # 돌아오면
         self.assertEqual(self.at.text_area(key=f"retry_answer_{no}").value, "다시 쓴 답")
         self.assertIn(RETRY_PENDING_MESSAGE, " ".join(i.value for i in self.at.info))
@@ -256,7 +256,7 @@ class RetryScoringRecoveryTest(RecoveryCase):
         self.at.text_area(key=f"retry_answer_{no}").input("다시 고친 답").run()  # 보관 중인 답을 고치면
         self.assertEqual(self.at.session_state["retry_pending"], {no: "다시 고친 답"})
         self.at.selectbox(key="retry_no").set_value(other).run()
-        del self.at.session_state[f"retry_answer_{no}"]
+        self.assertNotIn(f"retry_answer_{no}", self.at.session_state)
         self.at.selectbox(key="retry_no").set_value(no).run()
         self.assertEqual(self.at.text_area(key=f"retry_answer_{no}").value, "다시 고친 답")
 
@@ -297,7 +297,7 @@ class MaxHttpRequestsTest(RecoveryCase):
         self.finish_interview()
         self.use_transport(statuses)
         llm.ask_json = self.real_ask_json                              # 평가는 실제 ask_json → 실제 SDK
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         return self.requests
 
     def test_worst_case_four(self):
@@ -344,14 +344,6 @@ class StaticRecoveryTest(unittest.TestCase):
         self.assertEqual(values["AUTO_RETRY_SOURCES"], {"interviewer", "evaluation", "retry"})
         self.assertEqual(values["MAX_APP_ATTEMPTS"], 2)
         self.assertEqual(openai._constants.DEFAULT_MAX_RETRIES, 2)  # SDK 설정은 바꾸지 않음 (llm.py 그대로)
-
-    def test_memo_failure_keeps_draft(self):
-        """암기 탭: 채점 실패(call_ai False) 때 쓰던 대본을 kept 에 보관한다 (대화 상자라 화면 테스트 대신)."""
-        tree = ast.parse(self.source())
-        dialog = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "script_dialog")
-        branches = [n for n in ast.walk(dialog) if isinstance(n, ast.If) and "call_ai(" in ast.unparse(n.test)]
-        self.assertEqual(len(branches), 1)
-        self.assertIn("kept[result_key] = draft", ast.unparse(branches[0].orelse[0]))
 
     def test_interviewer_goes_through_run_ai(self):
         source = self.source()

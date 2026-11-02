@@ -265,15 +265,13 @@ class CompatibilityTest(unittest.TestCase):
 
 class StaticTest(unittest.TestCase):
 
-    def test_memo_review_linked_by_id(self):
+    def test_memo_ui_removed_data_kept(self):
+        """암기 기능은 MVP1 · 2 모두 제외: 화면 코드는 없고, 옛 리포트의 연습 대본 · 지운 답 칸은 저장할 때 그대로 넘긴다."""
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn('state.memo_reviews[result_key] = attempt["attempt_id"]', source)
-        tree = ast.parse(source)
-        show = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "show_review_result")
-        self.assertIn("a.get('attempt_id') == review_id", ast.unparse(show))
+        for removed in ("show_memorize", "script_dialog", "memo_reviews", "MEMO_TAB"):
+            self.assertNotIn(removed, source)
         self.assertNotIn("summarize_evaluation", source)
         self.assertNotIn("summarize_retry", source)
-
 
 class AppRestoreTest(AppErrorCase):
     """화면: 손상된 평가가 든 기록을 열면 질문 · 답만 불러오고 다시 평가받을 수 있다 (개발용 모의 데이터 길로 연다)."""
@@ -294,7 +292,7 @@ class AppRestoreTest(AppErrorCase):
         change(data["session"])
         coach.load_mock = lambda: copy.deepcopy(data)
         self.open_app(script)
-        self.at.button(key="title_new").click().run()
+        self.at.button(key="title_resume").click().run()
         self.click("모의 데이터로 열기")
         self.assertEqual(self.at.session_state["stage"], "done")
 
@@ -307,7 +305,7 @@ class AppRestoreTest(AppErrorCase):
         self.assertEqual((event["error_type"], event["source"], event["status"]), ("restore_validation", "restore", "failed"))
         self.assertIn("panel_role_missing:recruiter", event["codes"])
         self.assertEqual(len(self.at.session_state["evaluation_unreadable"]), 1)
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNotNone(self.at.session_state["evaluation"])
         self.assertEqual(len(self.at.session_state["evaluation_unreadable"]), 1)  # 원본은 다음 저장까지 남는다
 
@@ -324,6 +322,7 @@ class AppRestoreTest(AppErrorCase):
     def test_latest_unscored_refilled(self):
         self.open_mock(lambda ses: ses.update(latest_unscored={"1": {"answer": "지난번에 채점 못 받은 답"}}), {})
         self.assertEqual(self.at.session_state["retry_pending"], {1: "지난번에 채점 못 받은 답"})
+        self.to_retry()
         self.at.selectbox(key="retry_no").set_value(1).run()
         self.assertEqual(self.at.text_area(key="retry_answer_1").value, "지난번에 채점 못 받은 답")
 

@@ -1,7 +1,8 @@
-# 면접 화면 흐름 테스트 (P0-04). Streamlit AppTest + 가짜 AI(fake_llm.FakeAskJson). 외부 API 호출 없음.
+# 면접 화면 흐름 테스트 (P0-04 · MVP1 IA). Streamlit AppTest + 가짜 AI(fake_llm.FakeAskJson). 외부 API 호출 없음.
 # app.py 는 고치지 않는다: 실행 전에 llm.ask_json 을 가짜로 바꿔 끼운다 (app.py 가 'from llm import ask_json' 으로 읽음).
 # 대화 상자 안 버튼 · 파일 내려받기 · 브라우저 스크립트 · 화면 모양은 여기서 보지 않는다 (수동 점검).
-# 실행: d10-interview 폴더에서  python -m unittest discover tests   (이 파일만: python -m unittest tests/test_app_flow.py)
+# 화면 흐름 (IA): 시작 화면 → [+ 새 면접 시작] → 면접 정보 설정 → 5문항 → [평가 받기] → [평가 확인하기] → 그 회차 평가 기록
+# 실행: d10-interview 폴더에서  python -m unittest discover tests
 import os
 import unittest
 from pathlib import Path
@@ -16,8 +17,10 @@ from fake_llm import FakeAskJson, response, sequence
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 V1 = Path(__file__).parent / "fixtures" / "v1" / "supported"
 TIMEOUT = 60  # 첫 실행은 pandas · altair 를 불러오느라 몇 초 걸린다
-PROFILE = {"f_name": "김예시", "f_company": "클래스로", "f_company_desc": "IT, 헬스케어 진단 서비스",
-           "f_experience": "대학 팀 프로젝트에서 중고 거래 앱의 UX/UI 디자인을 맡아 사용자 인터뷰로 결제 이탈 원인을 찾았습니다."}
+COMPANY = "클래스로"
+LNB_RECORDS = ":material/history: 면접 기록 (전체)"
+LNB_EVAL = ":material/bar_chart: 평가 기록 (회차별)"
+LNB_RETRY = ":material/replay: 재도전 (전체)"
 
 
 class AppFlowCase(unittest.TestCase):
@@ -57,21 +60,28 @@ class AppFlowCase(unittest.TestCase):
         matches[0].click().run()
         self.no_exception()
 
-    def start_interview(self, persona: str | None = None):
-        """타이틀 → 새 면접 → (면접관 타입) → 지원 정보 → 브리핑 → 면접 시작."""
-        self.at.button(key="title_new").click().run()
-        if persona:
-            [b for b in self.at.get("button_group") if b.key == "persona_switch"][0].set_value(persona).run()
-        for key, value in PROFILE.items():
-            (self.at.text_area if key == "f_experience" else self.at.text_input)(key=key).input(value)
-        self.click("면접 시작하기")
-        self.assertEqual(self.ss["stage"], "briefing")
-        self.click("면접을 시작하겠습니다")
-        self.assertEqual(self.ss["stage"], "interview")
+    def setup(self, company: str = COMPANY, experience: str = ""):
+        """[+ 새 면접 시작] → 면접 정보 설정 (회사 · 내 경험은 선택)."""
+        self.at.button(key="gnb_new" if self.ss["page"] != "start" else "title_new").click().run()
+        self.assertEqual(self.ss["page"], "setup")
+        self.at.text_input(key="f_company").input(company).run()
+        if experience:
+            self.at.text_area(key="f_experience").input(experience).run()
+
+    def start_interview(self, company: str = COMPANY):
+        self.setup(company)
+        self.at.button(key="setup_start").click().run()
+        self.no_exception()
+        self.assertEqual((self.ss["page"], self.ss["stage"]), ("interview", "interview"))
 
     def answer(self, text: str):
         self.at.chat_input[0].set_value(text).run()
         self.no_exception()
+
+    def finish(self):
+        for i in range(6):
+            self.answer(f"답 {i}")
+        self.assertEqual(self.ss["stage"], "done")
 
     def chat_text(self) -> str:
         return "\n".join(m.markdown[0].value for m in self.at.chat_message if m.markdown)
@@ -79,7 +89,13 @@ class AppFlowCase(unittest.TestCase):
     def metric(self, label: str) -> str:
         return [m.value for m in self.at.metric if m.label == label][0]
 
+    def lnb(self, label: str):
+        self.at.segmented_control(key="lnb").set_value(label).run()
+        self.no_exception()
+
     def retry(self, answer: str):
+        if self.ss.get("lnb") != LNB_RETRY or self.ss["page"] != "coaching":
+            self.lnb(LNB_RETRY)
         no = self.at.selectbox(key="retry_no").value
         self.at.text_area(key=f"retry_answer_{no}").input(answer)
         self.click("다시 채점")
@@ -89,7 +105,7 @@ class AppFlowCase(unittest.TestCase):
 class InterviewFlowTest(AppFlowCase):
 
     def test_probe_interview_evaluation_and_retry(self):
-        """일반형(디자인 팀장): 시작 → 질문 → 꼬리 질문 1개 → 5문항 → 평가 → 재도전 반영."""
+        """시작 → 질문 → 꼬리 질문 1개 → 5문항 → [평가 받기] → [평가 확인하기] → 평가 기록 → 재도전 (전체)."""
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [response("evaluation", "mixed")],
                        "retry": [response("retry", "improved")]})
         self.start_interview()
@@ -106,10 +122,14 @@ class InterviewFlowTest(AppFlowCase):
         self.assertEqual((self.ss["stage"], self.ss["q_index"]), ("done", coach.TOTAL_QUESTIONS))
         self.assertEqual(sum(m.get("kind") == "question" for m in self.ss["messages"]), coach.TOTAL_QUESTIONS)
 
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertEqual([a["score"] for a in self.ss["evaluation"]["answers"]], [20, 10, 12, 15, 8])
+        self.assertEqual(self.ss["page"], "interview")  # 평가 뒤 임의 화면으로 가지 않는다
+        self.click("평가 확인하기")
+        self.assertEqual((self.ss["page"], self.ss["lnb"]), ("coaching", LNB_EVAL))
+        self.assertEqual(self.ss["coach_group"], {"key": COMPANY, "job": "디자인"})
         self.assertEqual(self.metric("종합 점수"), "65/100")
-        self.assertEqual(len(self.at.tabs), 6)
+        self.assertEqual(len(self.at.tabs), 0)  # 예전 탭 6개 구조가 아니다
 
         no = self.retry("결론부터 말하면, 인터뷰 5회로 결제 이탈 원인을 찾았습니다.")
         self.assertEqual(no, 5)  # 지금 점수가 가장 낮은 질문이 먼저 골라져 있다
@@ -118,6 +138,8 @@ class InterviewFlowTest(AppFlowCase):
         self.assertEqual(self.ss["retry_counts"], {5: 1})
         self.assertEqual(self.metric("종합 점수"), "73/100")
         self.assertEqual(self.ss["evaluation"]["answers"][4]["score"], 8)  # 최초 평가는 그대로
+        record = self.ss["store_rounds"][0]
+        self.assertEqual(record["retries"][5]["score"], 16)  # 회차 레코드에도 반영
         self.assertEqual(self.fake.remaining(), {})
 
     def test_follow_up_limit(self):
@@ -129,16 +151,33 @@ class InterviewFlowTest(AppFlowCase):
         self.assertEqual((self.ss["q_index"], self.ss["follow_ups"]), (1, 0))
         self.assertNotIn(response("interviewer", "wants_more")["reply"], self.chat_text())
 
-    def test_feedback_persona(self):
-        """피드백형(프로덕트 디자인 리드): 질문마다 꼬리 질문 1개 + 피드백, 10번 호출로 5문항."""
-        self.open_app({"interviewer": sequence("feedback_every_question")})
-        self.start_interview("프로덕트 디자인 리드")
-        self.assertEqual(self.ss["profile"]["persona_type"], "프로덕트 디자인 리드")
-        for i in range(10):
-            self.answer(f"답 {i}")
-        self.assertEqual(self.ss["stage"], "done")
-        self.assertEqual(sum(c["name"] == "interviewer" for c in self.fake.calls), 10)
-        self.assertIn(response("interviewer", "feedback_review_flag_true")["reply"], self.chat_text())
+    def test_single_interviewer_no_choice(self):
+        """직군별 대표 면접관 1명 자동 배정: 고르는 칸이 없고, 디자인은 '디자인 팀장' (면접 중 피드백 방식 없음)."""
+        self.open_app({})
+        self.setup()
+        self.assertEqual([b for b in self.at.get("button_group") if b.key == "persona_switch"], [])
+        self.assertIn("디자인 팀장", " ".join(m.value for m in self.at.markdown))
+        self.assertNotIn("프로덕트 디자인 리드", " ".join(m.value for m in self.at.markdown))
+
+    def test_company_and_experience_optional(self):
+        """회사 · 내 경험 없이 시작 → '기타' 그룹 1회차."""
+        self.open_app({"interviewer": sequence("probe_one_follow_up")})
+        self.start_interview(company="")
+        record = self.ss["store_rounds"][0]
+        self.assertEqual((record["company_key"], record["company_name"], record["round_number"]), (None, "", 1))
+        self.assertEqual(record["experience"], "")
+
+    def test_field_interview_first_round(self):
+        """첫 회차부터 분야별 면접: 공통 2 + 분야 3."""
+        self.open_app({})
+        self.setup()
+        self.at.radio(key="f_type").set_value("field").run()
+        [b for b in self.at.get("button_group") if b.key == "f_field"][0].set_value("헬스케어").run()
+        self.at.button(key="setup_start").click().run()
+        self.no_exception()
+        fields = [q["field"] for q in self.ss["questions"]]
+        self.assertEqual(sum(f != coach.DEFAULT_FIELD for f in fields), 3)
+        self.assertEqual(self.ss["store_rounds"][0]["interview_type"], "field")
 
     def test_evaluation_failure_then_retry(self):
         """평가가 실패하면 한국어 에러 한 줄 · 평가 없음 · 답은 그대로. 다시 누르면 성공."""
@@ -146,14 +185,13 @@ class InterviewFlowTest(AppFlowCase):
                        "evaluation": [LLMError("AI 응답을 받지 못했어요. 잠시 뒤 다시 시도해 주세요."),
                                       response("evaluation", "perfect")]})
         self.start_interview()
-        for i in range(6):
-            self.answer(f"답 {i}")
+        self.finish()
         messages = list(self.ss["messages"])
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertIsNone(self.ss["evaluation"])
         self.assertIn("AI 응답을 받지 못했어요", " ".join(e.value for e in self.at.error))
         self.assertEqual(self.ss["messages"], messages)
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
         self.assertEqual(self.metric("종합 점수"), "100/100")
 
     def test_retry_not_reflected(self):
@@ -161,44 +199,84 @@ class InterviewFlowTest(AppFlowCase):
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [response("evaluation", "mixed")],
                        "retry": [response("retry", "lower")]})
         self.start_interview()
-        for i in range(6):
-            self.answer(f"답 {i}")
-        self.click("위원 4명에게 평가받기")
+        self.finish()
+        self.click("평가 받기")
+        self.click("평가 확인하기")
         no = self.retry("다시 쓴 답")
         self.assertEqual(len(self.ss["retry_history"][no]), 1)
         self.assertEqual(self.ss["retries"], {})
         self.assertEqual(self.metric("종합 점수"), "65/100")
 
 
+class CompanyRoundTest(AppFlowCase):
+
+    def interview(self, company: str):
+        self.start_interview(company)
+        self.finish()
+        self.click("평가 받기")
+
+    def test_rounds_counted_per_company_and_job(self):
+        """회차 번호는 회사(또는 '기타') + 직군별로 누적한다. 다른 회사 기록은 이전 회차가 아니다."""
+        evals = [response("evaluation", "mixed") for _ in range(3)]
+        self.open_app({"interviewer": sequence("probe_one_follow_up") * 3, "evaluation": evals})
+        self.interview("A회사")
+        self.interview("B회사")
+        self.assertEqual(self.ss["round"], 1)            # B회사 첫 면접은 1회차
+        self.assertIsNone(self.ss["previous"])            # A회사 기록과 비교하지 않는다
+        self.interview(" A회사 ")                          # 앞뒤 공백만 다르면 같은 회사
+        self.assertEqual(self.ss["round"], 2)
+        self.assertEqual(self.ss["previous"]["round"], 1)
+        numbers = sorted((r["company_key"], r["round_number"]) for r in self.ss["store_rounds"])
+        self.assertEqual(numbers, [("A회사", 1), ("A회사", 2), ("B회사", 1)])
+
+    def test_question_modes_only_after_first_round(self):
+        self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [response("evaluation", "mixed")]})
+        self.setup()
+        self.assertNotIn("질문 출제 방식", [r.label for r in self.at.radio])  # 첫 회차는 숨김
+        self.at.button(key="setup_start").click().run()
+        self.finish()
+        self.setup()
+        self.assertIn("질문 출제 방식", [r.label for r in self.at.radio])
+
+
 class ResumeFlowTest(AppFlowCase):
 
     def upload(self, name: str):
         self.at.button(key="title_resume").click().run()
+        self.assertEqual(self.ss["page"], "restore")
         self.at.get("file_uploader")[0].upload(f"261102-클래스로-디자인-{name}.md", (V1 / f"{name}.md").read_bytes(),
                                                "text/markdown").run()
         self.no_exception()
 
-    def test_resume_v1_without_interview(self):
-        """v1 리포트를 올려 '면접 없이 이어 하기': 같은 회차 · 재도전 기록 · 횟수 그대로 (AI 호출 없음)."""
+    def open_records(self):
+        self.click("면접 기록 보기")
+        self.assertEqual(self.ss["page"], "coaching")
+        [b for b in self.at.button if b.key and b.key.startswith("open_")][0].click().run()
+        self.no_exception()
+
+    def test_restore_v1_and_continue(self):
+        """v1 리포트 복원: 같은 회차 · 재도전 기록 · 최고 점수 그대로 (AI 호출 없음), 평가 기록에서 바로 이어 간다."""
         self.open_app({})
         self.upload("v1_with_retry")
-        self.assertEqual(self.ss["previous"]["round"], 2)
-        [c for c in self.at.checkbox if c.key == "resume_skip"][0].check().run()
-        self.click("지난 결과로 이어서 하기")
+        self.open_records()
+        self.lnb(LNB_EVAL)
         self.assertEqual((self.ss["stage"], self.ss["round"]), ("done", 2))
         self.assertEqual({k: v["score"] for k, v in self.ss["retries"].items()}, {2: 15})
         self.assertEqual(self.ss["retry_counts"], {2: 2, 3: 1})
         self.assertEqual(self.metric("종합 점수"), "86/100")
         self.assertEqual(self.fake.calls, [])
 
-    def test_next_round_from_v1(self):
-        """v1 리포트로 다음 회차: 지원 정보가 채워지고, 기본 '같은 질문' 으로 2회차를 시작한다."""
+    def test_next_round_same_questions(self):
+        """복원한 회사 · 직군으로 새 회차: 2회차 · '똑같은 질문 → 이전 회차 선택' 이면 질문이 같다."""
         self.open_app({})
         self.upload("v1_no_retry")
-        self.assertEqual(self.at.text_input(key="f_company").value, self.ss["previous"]["profile"]["company"])
-        self.click("면접 시작하기")
-        self.assertEqual((self.ss["stage"], self.ss["round"]), ("briefing", 2))
-        self.assertEqual([q["question"] for q in self.ss["questions"]], self.ss["previous"]["questions"])
+        record = self.ss["store_rounds"][0]
+        self.setup(company=record["company_name"])
+        self.at.radio(key="f_mode").set_value("same").run()
+        self.at.button(key="setup_start").click().run()
+        self.no_exception()
+        self.assertEqual((self.ss["stage"], self.ss["round"]), ("interview", 2))
+        self.assertEqual([q["question"] for q in self.ss["questions"]], [q["question"] for q in record["questions"]])
 
 
 if __name__ == "__main__":

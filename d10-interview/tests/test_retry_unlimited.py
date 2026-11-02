@@ -23,7 +23,8 @@ class RetryCase(RecoveryCase):
                        "retry": retries})
         self.start_interview()
         self.finish_interview()
-        self.click("위원 4명에게 평가받기")
+        self.click("평가 받기")
+        self.to_retry()
 
     def submit(self, no, text):
         self.at.selectbox(key="retry_no").set_value(no).run()
@@ -151,14 +152,9 @@ class SaveRestoreTest(RetryCase):
         for i in range(6):
             self.submit(5, f"재도전 {i + 1}")
         ss = self.at.session_state
-        text = coach.build_report(
-            ss["profile"], ss["questions"], ss["evaluation"], ss["retries"], ss["messages"],
-            None, None, None, 1, coach.load_precheck(), {}, "2026-11-02 12:00", date(2026, 11, 2),
-            retry_counts=ss["retry_counts"], understanding=ss["understanding"], retry_history=ss["retry_history"],
-            clue_set=ss["clue_set"], clue_round=1,
-        )
-        parsed = coach.parse_report(text)
-        s = coach.rebuild_session(parsed["session"], ss["questions"])
+        self.at.run()  # 화면 상태를 회차 레코드에 돌려 쓴다 (매 실행 처음)
+        text = coach.build_store_file(ss["store_rounds"], "테스터", "2026-11-02 12:00", date(2026, 11, 2))  # v2 통합 저장
+        [(s, _)] = coach.parse_store_file(text, coach.load_questions())["rounds"]
         self.assertEqual([a["answer"] for a in s["retry_history"][5]], [f"재도전 {i + 1}" for i in range(6)])
         self.assertEqual(s["retries"][5]["answer"], "재도전 4")      # 19점 동점 → 먼저 받은 답 (6번째 아님)
         self.assertEqual(s["retry_counts"], {5: 6})
@@ -183,19 +179,6 @@ class StaticTest(unittest.TestCase):
         self.assertNotIn("MAX_RETRIES", app + engine)
         self.assertNotIn("남은 기회", app)
         self.assertFalse(hasattr(coach, "MAX_RETRIES"))
-
-    def test_memo_review_not_limited(self):
-        """암기 탭 재도전 검토 (대화 상자라 화면 테스트 대신): 횟수 비교 분기가 없고, 성공 시 횟수를 1 늘린다."""
-        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-        dialog = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "script_dialog")
-        source = ast.unparse(dialog)
-        self.assertNotIn("retry_counts.get(no, 0) >=", source)
-        self.assertIn("graded_answers(no)", source)                    # 같은 대본 다시 채점 안 함 (기존)
-        store = next(n for n in ast.walk(dialog) if isinstance(n, ast.FunctionDef) and n.name == "store")
-        self.assertIn("record_retry(no, attempt", ast.unparse(store))
-        record = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "record_retry")
-        self.assertIn("state.retry_counts[no] = len(history)", ast.unparse(record))  # 횟수 = 기록 개수 (E-5)
-
 
 if __name__ == "__main__":
     unittest.main()
