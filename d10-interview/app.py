@@ -907,7 +907,7 @@ if state.stage in ("pick", "start") and state.get("start_mode") not in ("new", "
                     with st.container(key="splash_sub"):
                         st.markdown("합격을 향한 전세역전(戰勢逆轉) 취업 코칭 서비스")
             with st.container(key="title_body"):
-                st.markdown("모의면접 · 질문 5개와 꼬리 질문으로 경험과 전략을 발전시켜요.")
+                st.markdown("면접을 통해 경험을 발견하고 체계적으로 관리해, 나만의 취업 전략을 완성하세요.")
                 with st.container(key="title_menu"):
                     st.button(":material/play_arrow: 새 면접 시작", key="title_new", type="primary", width="stretch",
                               on_click=open_window, args=("new",))
