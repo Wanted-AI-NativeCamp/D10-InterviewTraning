@@ -4,6 +4,7 @@ import unittest
 
 import coach
 from prompts import FIELDS
+from fake_llm import sequence
 from test_app_flow import AppFlowCase
 
 BANK = coach.load_questions()
@@ -83,6 +84,27 @@ class FieldSetupScreenTest(AppFlowCase):
         self.assertEqual((record["job"], record["field"]), ("PO", "에듀테크"))
         self.assertEqual([q.get("field") for q in record["questions"]][2:], ["에듀테크"] * 3)
         self.assertEqual(self.fake.calls, [])
+
+    def start_field(self, job: str, field: str):
+        self.setup()
+        self.at.button_group(key="f_job").set_value(job).run()
+        self.at.radio(key="f_type").set_value("field").run()
+        self.at.button_group(key="f_field").set_value(field).run()
+        self.at.button(key="setup_start").click().run()
+        self.no_exception()
+
+    def test_repeat_field_round_reuses_field_and_notices(self):
+        """같은 회사 · 직군 · 분야 2회차: 분야당 경험 질문이 1개라 지난 분야 질문을 다시 쓰고 (공통으로 바꾸지 않음) 안내한다."""
+        self.open_app({"interviewer": sequence("probe_one_follow_up") * 2})
+        self.start_field("PO", "커머스")
+        self.finish()
+        first = self.ss["store_rounds"][-1]["questions"]
+        self.start_field("PO", "커머스")
+        second = self.ss["store_rounds"][-1]["questions"]
+        self.assertEqual([q.get("field") for q in second][2:], ["커머스"] * 3)
+        self.assertEqual(len({q["question"] for q in second}), 5)                  # 회차 안 중복 없음
+        self.assertEqual(second[3]["question"], first[3]["question"])            # 경험 자리: 하나뿐인 분야 질문 다시
+        self.assertTrue(any("다시 넣었어요" in i.value for i in self.at.info))
 
 
 if __name__ == "__main__":

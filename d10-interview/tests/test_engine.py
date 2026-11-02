@@ -367,29 +367,56 @@ class PickCluesTest(unittest.TestCase):
 
 # ── 문제일 수 있는 현재 동작 (보고됨 · 고치면 여기를 바꾼다) ───────────────────
 # 향후 작업 (P0-02 에서 발견 · 지금은 고치지 않음)
-#   #1 분야 질문 소진 시 조용히 공통으로      → P3 질문 출제 정책 개선 (P3-05)
-#   #2 섞어서 + 분야 변경 시 분야 질문 부족   → P3 질문 출제 정책 개선 (P3-05)
+#   #1 분야 질문 소진 시 조용히 공통으로      → 해결: 나온 분야 질문을 다시 쓰고 안내 (PlanQuestionsTest)
+#   #2 섞어서 + 분야 변경 시 분야 질문 부족   → 해결: 분야가 다른 지난 질문은 남기지 않음 (PlanQuestionsTest)
 #   #3 위원 누락을 0점으로 평균               → 1차 · AI 평가 응답 검증 · 오류 처리 (임의 점수 계산 금지 방안 검토)
 #   #4 0부터 매긴 답 번호가 밀려 붙음         → 1차 · AI 평가 응답 검증 · 오류 처리 (잘못된 연결 금지 방안 검토)
 #   #5 check 글이 글자로 쪼개짐               → 1차 · 입력 데이터 검증 필요성 검토
 #   #6 재도전 횟수가 기록에서 복원되지 않음   → P1 저장 · 복원 구조 개선 시 검토
 #   #7 디자인 · 공통 분야 3회차부터 재출제    → 질문 은행 확장 정책 결정 시 검토 (데이터 · 테스트 없음, PlanQuestionsTest 참고)
-class KnownBehaviorTest(unittest.TestCase):
+class FieldRepeatTest(unittest.TestCase):
+    """반복 면접: 분야 질문이 모자라도 공통 질문으로 바꾸지 않고 나온 분야 질문을 다시 써서 공통 2 + 분야 3 을 지킨다."""
 
-    def test_field_exhausted_falls_back_to_common_silently(self):
-        """#1 분야 질문을 모두 피하면 분야 자리가 분야 '공통' 질문으로 바뀌고, 안내(note)도 없다."""
+    def test_field_exhausted_reuses_field_questions_with_note(self):
+        """(옛 #1) 분야 질문을 모두 피해도 분야 자리는 그 분야 질문 (다시 출제) · 다시 넣었다고 안내."""
         asked = set(BANK[(BANK["직군"] == JOB) & (BANK["분야"] == FIELD)]["질문"])
         qs, note = coach.plan_questions(BANK, JOB, FIELD, "헬스케어", "new", None, asked)
-        self.assertEqual([q["field"] for q in qs], [coach.DEFAULT_FIELD] * 5)
-        self.assertIsNone(note)
+        self.assertEqual([q["field"] for q in qs], [coach.DEFAULT_FIELD] * 2 + [FIELD] * 3)
+        self.assertIn("다시 넣었어요", note)
 
-    def test_mix_after_field_change_keeps_common_questions(self):
-        """#2 '섞어서' 로 분야를 바꾸면 지난 공통 질문이 분야 자리에 남아 분야 질문이 3개보다 적어진다."""
+    def test_unused_field_questions_first(self):
+        """안 나온 분야 질문이 있으면 그것부터 (같은 유형에서 하나만 남겼을 때 그 질문)."""
+        rows = BANK[(BANK["직군"] == JOB) & (BANK["분야"] == FIELD) & (BANK["유형"] == "직무")]
+        keep = rows[rows["회사 키워드"] == ""]["질문"].iloc[0]  # 회사 키워드가 없어 어느 회사에서나 나오는 질문
+        asked = set(rows["질문"]) - {keep}
+        for _ in range(5):
+            qs, _ = coach.plan_questions(BANK, JOB, FIELD, "헬스케어", "new", None, asked)
+            self.assertEqual(qs[2]["question"], keep)
+
+    def test_mix_after_field_change_keeps_field3(self):
+        """(옛 #2) '섞어서' 로 분야를 바꿔도 분야 자리에 지난 공통 질문을 남기지 않는다."""
         np.random.seed(0)
         prev = [q["question"] for q in coach.pick_questions(BANK, JOB)]
         np.random.seed(0)
         qs, _ = coach.plan_questions(BANK, JOB, FIELD, "", "mix", prev, set(prev), random.Random(0))
-        self.assertLess(sum(q["field"] == FIELD for q in qs), 3)
+        self.assertEqual([q["field"] for q in qs][2:], [FIELD] * 3)
+
+    def test_no_duplicate_in_round(self):
+        """반복 회차를 여러 번 해도 한 회차 안에 같은 질문은 없다 (새로운 문제만 · 섞어서 · 분야 바꿔 섞기)."""
+        rng = random.Random(1)
+        np.random.seed(1)
+        asked, prev = set(), None
+        for mode, field in [("new", FIELD)] * 4 + [("mix", FIELD), ("mix", coach.DEFAULT_FIELD), ("mix", FIELD)]:
+            qs, _ = coach.plan_questions(BANK, JOB, field, "헬스케어", mode, prev, asked, rng)
+            texts = [q["question"] for q in qs]
+            self.assertEqual(len(set(texts)), coach.TOTAL_QUESTIONS, (mode, field))
+            if field != coach.DEFAULT_FIELD:
+                self.assertEqual([q["field"] for q in qs][2:], [field] * 3, mode)
+            asked |= set(texts)
+            prev = texts
+
+
+class KnownBehaviorTest(unittest.TestCase):
 
     def test_missing_panel_role_counts_as_zero(self):
         """#3 AI 가 위원을 빠뜨리면 그 위원을 0점으로 넣어 평균이 내려간다."""

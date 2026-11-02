@@ -251,7 +251,8 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD, compa
     """자기소개 1 + 공통 1 + 직무 1 + 경험 1 + 상황 1 = 5개를 이 순서로 무작위로 고른다.
     자리마다 고른 분야의 질문이 있으면 그중에서, 없으면 분야 공통 질문에서 고른다.
     company_text(회사 이름 · 설명)에 맞지 않는 질문(회사 키워드가 하나도 없는 질문)은 빼고 고른다.
-    avoid(지난 회차에 나온 질문 글)를 주면 안 나온 질문부터: 고른 분야 → 분야 공통 → (모두 나왔으면) 나온 질문 다시."""
+    avoid(지난 회차에 나온 질문 글)를 주면 안 나온 질문부터. 분야 자리는 안 나온 분야 질문 → 나온 분야 질문 다시
+    (공통 질문으로 바꾸지 않는다), 공통 자리는 안 나온 질문 → 나온 질문 다시. 한 회차 안에서 같은 질문은 두 번 고르지 않는다."""
     avoid = avoid or set()
     df = df[[fits_company(k, company_text) for k in df["회사 키워드"]]] if "회사 키워드" in df.columns else df
     common = df[df["직군"] == "공통"]
@@ -267,13 +268,16 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD, compa
     ]
     picked = []
     for pool in pools:
+        pool = pool[~pool["질문"].isin([q["question"] for q in picked])]  # 같은 회차 안에서 같은 질문 두 번 금지
         in_field = pool[pool["분야"] == field] if field != DEFAULT_FIELD else pool.iloc[0:0]
         base = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
         if base.empty:
             raise ValueError(f"'{job}' 직군 질문이 질문 은행에 부족해요.")
-        tiers = [base, pool[pool["분야"] == DEFAULT_FIELD]]
+        # 분야 자리: 안 나온 분야 질문 → 나온 분야 질문 다시 (공통 질문으로 바꾸지 않아 공통 2 + 분야 3 유지)
+        # 공통 자리 · 이 분야에 이 유형 질문이 없는 자리: 안 나온 질문 → 나온 질문 다시
+        tiers = [base] if not in_field.empty else [base, pool[pool["분야"] == DEFAULT_FIELD]]
         fresh = [t[~t["질문"].isin(avoid)] for t in tiers]
-        choice = next((t for t in fresh if not t.empty), base)  # 안 나온 질문이 없으면 나온 질문 다시
+        choice = next((t for t in fresh if not t.empty), base)
         picked.append(question_row(choice.sample(1).iloc[0]))
     assert len(picked) == TOTAL_QUESTIONS
     return picked
@@ -307,7 +311,12 @@ def plan_questions(df: pd.DataFrame, job: str, field: str, company_text: str, mo
         # 자기소개(첫 자리)는 매번 같은 질문이라 빼고, 나머지 자리에서 지난 질문 MIX_KEEP 개를 남긴다
         slots = [i for i, text in enumerate(previous[:TOTAL_QUESTIONS]) if i > 0 and not bank[bank["질문"] == text].empty]
         for i in rng.sample(slots, min(MIX_KEEP, len(slots))):
-            questions[i] = question_row(bank[bank["질문"] == previous[i]].iloc[0])
+            if previous[i] in {q["question"] for j, q in enumerate(questions) if j != i}:
+                continue  # 다른 자리에 이미 있는 질문은 남기지 않는다 (같은 회차 안 중복 금지)
+            kept_row = question_row(bank[bank["질문"] == previous[i]].iloc[0])
+            if kept_row["field"] != questions[i]["field"]:
+                continue  # 분야를 바꿨으면 지난 질문을 남기지 않는다 (공통 2 + 분야 3 유지)
+            questions[i] = kept_row
         kept = {previous[i] for i in slots} & {q["question"] for q in questions}
         repeats = sum(1 for q in questions[1:] if q["question"] in asked and q["question"] not in kept)
     else:
