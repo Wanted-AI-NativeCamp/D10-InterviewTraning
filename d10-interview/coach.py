@@ -923,11 +923,14 @@ def answer_text(messages: list[dict], index: int) -> str:
 
 
 def format_record(questions: list[dict], messages: list[dict]) -> str:
-    """면접 기록을 질문별로 묶는다. 메시지의 'q' 는 질문 번호(0부터)."""
+    """면접 기록을 질문별로 묶는다 (평가 위원회 입력). 메시지의 'q' 는 질문 번호(0부터).
+    질문 은행의 '보는 점'이 있으면 질문 바로 아래에 붙인다. 옛 기록처럼 없으면 그 줄을 빼고 그대로."""
     names = {"assistant": "면접관", "user": "지원자"}
     blocks = []
     for i, q in enumerate(questions):
         lines = [f"[질문 {i + 1} · {q['type']}] {q['question']}"]
+        if str(q.get("point") or "").strip():
+            lines.append(f"[보는 점] {str(q['point']).strip()}")
         lines += [
             f"[{names[m['role']]}] {plain(m['content'])}"
             for m in messages
