@@ -126,7 +126,10 @@ class InterviewFlowTest(AppFlowCase):
         self.assertEqual([a["score"] for a in self.ss["evaluation"]["answers"]], [20, 10, 12, 15, 8])
         self.assertEqual(self.ss["page"], "interview")  # 평가 뒤 임의 화면으로 가지 않는다
         self.click("평가 확인하기")
-        self.assertEqual((self.ss["page"], self.ss["lnb"]), ("coaching", LNB_EVAL))
+        # 그 회사 · 직군 · 회차의 면접 기록 확인 화면 (평가 기록 LNB 로 바로 가지 않는다)
+        self.assertEqual((self.ss["page"], self.ss["lnb"]), ("coaching", LNB_RECORDS))
+        self.assertEqual(self.ss["records_round"], self.ss["active_round_id"])
+        self.lnb(LNB_EVAL)
         self.assertEqual(self.ss["coach_group"], {"key": COMPANY, "job": "디자인"})
         self.assertEqual(self.metric("종합 점수"), "65/100")
         self.assertEqual(len(self.at.tabs), 0)  # 예전 탭 6개 구조가 아니다

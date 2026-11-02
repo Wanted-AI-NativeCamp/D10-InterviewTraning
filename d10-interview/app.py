@@ -1509,10 +1509,12 @@ def group_label(key: str | None) -> str:
 
 def go_page(page: str):
     state.page = page
+    state.page_top = True  # 다른 화면으로 가면 맨 위부터 (면접 화면은 입력창 때문에 맨 아래에 붙어 있다)
 
 
 def open_group(key: str | None, job: str, lnb: str = LNB_RECORDS):
     state.page = "coaching"
+    state.page_top = True
     state.coach_group = {"key": key, "job": job}
     state.lnb = lnb
 
@@ -1891,8 +1893,11 @@ def show_status_sidebar(record: dict):
             st.rerun()
 
 
-def go_eval_record():
-    open_group(active_round().get("company_key"), active_round()["job"], LNB_EVAL)
+def go_round_record():
+    """[평가 확인하기] → 그 회사 · 직군 · 회차의 면접 기록 확인 화면 (LNB 면접 기록 (전체) 에서 이 회차를 고른 상태)."""
+    record = active_round()
+    open_group(record.get("company_key"), record["job"], LNB_RECORDS)
+    state.records_round = record["round_id"]
 
 
 def page_interview():
@@ -1910,7 +1915,7 @@ def page_interview():
         st.success("질문 5개를 모두 마쳤어요. 수고하셨습니다.")
         if state.evaluation:
             st.info("평가가 끝났어요. 이 회차의 평가 기록에서 확인해 주세요.")
-            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_eval_record)
+            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_round_record)
         elif st.button(":material/gavel: 평가 받기", type="primary", key="eval_request"):
             if request_evaluation():
                 st.rerun()
@@ -2142,6 +2147,8 @@ if state.page == "start":
     page_start()
     st.stop()
 show_header()
+if state.pop("page_top", False):
+    scroll_to_top()
 show_notices()
 if state.pop("restart_pending", False):
     restart_dialog()
