@@ -15,6 +15,15 @@ class InterviewFinishTest(AppFlowCase):
         for i in range(5):  # 첫 답 뒤 꼬리 질문 1개 → 다섯 번 답하면 5번째 질문
             self.answer(f"답 {i}")
 
+    def test_last_question_placeholder(self):
+        self.open_app({"interviewer": sequence("probe_one_follow_up")})
+        self.start_interview()
+        self.assertNotIn("마지막 질문", self.at.chat_input[0].placeholder)
+        for i in range(5):
+            self.answer(f"답 {i}")
+        self.assertEqual(self.ss["q_index"], 4)
+        self.assertIn("마지막 질문이에요", self.at.chat_input[0].placeholder)
+
     def test_finish_shows_done_and_scrolls_once(self):
         self.open_app({"interviewer": sequence("probe_one_follow_up")})
         self.answer_until_last()

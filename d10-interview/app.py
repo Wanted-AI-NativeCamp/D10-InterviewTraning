@@ -235,6 +235,12 @@ def hover_css() -> str:
 .st-key-memo_qcard [data-testid="stColumn"]:nth-child(2) [data-testid="stCaptionContainer"] {{ text-align: center; }}
 .st-key-memo_qcard h4 {{ text-align: center; word-break: keep-all; }}
 .st-key-memo_qcard [data-testid="stMarkdownContainer"] p:has(> .stMarkdownBadge) {{ text-align: center; }}  /* 공통 · 분야 질문 태그 */  /* 한국어는 어절 단위로 줄바꿈 */
+/* 면접 완료 안내 (show_interview_done): 브랜드 블루 왼쪽 선 · 옅은 바탕. 아래로 내릴 때 입력창 자리만큼 여백 */
+.st-key-interview_done {{ background: {"rgba(61, 123, 255, 0.12)" if dark else "#F5F8FE"};
+  border: 1px solid {"rgba(141, 180, 255, 0.22)" if dark else "#E6E9F0"}; border-left: 4px solid {"#8DB4FF" if dark else "#0252DE"};
+  border-radius: 16px; padding: 20px 24px; gap: 8px; margin-top: 8px; scroll-margin-bottom: 48px; }}
+.st-key-interview_done [data-testid="stMarkdown"] {{ margin-bottom: 0 !important; }}
+.st-key-interview_done button [data-testid="stMarkdownContainer"] p {{ color: inherit !important; }}
 </style>"""
 
 
@@ -1437,7 +1443,9 @@ def send_answer(text: str, show_bubble: bool):
 
 def interview_turn():
     """면접 중 답 한 번: 보관한 답이 있으면 [다시 시도] · [답변 수정] 부터, 없으면 입력창의 새 답."""
-    answer = st.chat_input(f"답을 적어 주세요 ({coach.MAX_ANSWER_CHARS:,}자까지)", max_chars=coach.MAX_ANSWER_CHARS)
+    last = state.q_index == coach.TOTAL_QUESTIONS - 1
+    answer = st.chat_input(f"{'마지막 질문이에요. ' if last else ''}답을 적어 주세요 ({coach.MAX_ANSWER_CHARS:,}자까지)",
+                           max_chars=coach.MAX_ANSWER_CHARS)
     pending = state.get("pending_answer")
     if pending:
         # 전달하지 못한 답이 있으면 그 답부터: 사용자가 [다시 시도] 또는 [수정한 답변 보내기] 를 눌렀을 때만 보낸다
