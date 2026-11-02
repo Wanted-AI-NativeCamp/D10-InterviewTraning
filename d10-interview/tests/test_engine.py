@@ -249,9 +249,12 @@ class ReflectedRetryTest(unittest.TestCase):
         self.assertIsNone(coach.reflected_retry(12, [attempt(3, 3, 3, 3), attempt(2, 2, 2, 2)]))  # 같거나 낮음
         self.assertIsNone(coach.reflected_retry(12, []))
 
-    def test_tie_takes_later(self):
+    def test_tie_keeps_earlier_best(self):
+        """동점이면 먼저 받은 최고 점수 답을 유지한다 (E-4B). 더 높은 점수가 와야 바뀐다."""
         history = [attempt(4, 4, 4, 4, "앞"), attempt(4, 4, 4, 4, "뒤")]
-        self.assertEqual(coach.reflected_retry(10, history)["answer"], "뒤")
+        self.assertEqual(coach.reflected_retry(10, history)["answer"], "앞")
+        history.append(attempt(5, 4, 4, 4, "더 높음"))
+        self.assertEqual(coach.reflected_retry(10, history)["answer"], "더 높음")
 
     def test_failed_retries(self):
         history = [attempt(2, 2, 2, 2), attempt(4, 4, 4, 4), attempt(3, 3, 3, 3)]  # 8 · 16 · 12
@@ -281,12 +284,13 @@ class RebuildSessionTest(unittest.TestCase):
         self.assertEqual((s["retries"], s["retry_history"], s["retry_counts"]), ({}, {}, {}))
         self.assertEqual((s["clue_round"], s["clue_set"]), (1, None))
 
-    def test_history_reflects_best_and_trims(self):
-        history = {"1": [self.retry_raw(n) for n in (1, 4, 3, 5)]}  # 4 · 16 · 12 · 20 → 앞 3개만
-        s = coach.rebuild_session(self.session(retry_history=history, retry_counts={"1": 3}), questions5())
-        self.assertEqual([a["score"] for a in s["retry_history"][1]], [4, 16, 12])
-        self.assertEqual(s["retries"][1]["score"], 16)
-        self.assertEqual(s["retry_counts"], {1: 3})
+    def test_history_reflects_best_not_trimmed(self):
+        """재도전 기록은 3개로 자르지 않는다 (E-4B): 4번째 이후의 최고 점수도 복원된다."""
+        history = {"1": [self.retry_raw(n) for n in (1, 4, 3, 5, 2)]}  # 4 · 16 · 12 · 20 · 8
+        s = coach.rebuild_session(self.session(retry_history=history, retry_counts={"1": 5}), questions5())
+        self.assertEqual([a["score"] for a in s["retry_history"][1]], [4, 16, 12, 20, 8])
+        self.assertEqual(s["retries"][1]["score"], 20)
+        self.assertEqual(s["retry_counts"], {1: 5})
 
     def test_old_report_with_only_retries(self):
         """재도전 기록 기능 전 리포트: 남은 재도전 하나를 기록으로 쓰고, 처음보다 낮으면 반영하지 않는다."""
@@ -302,7 +306,8 @@ class RebuildSessionTest(unittest.TestCase):
             clues={"round": 3, "set": [{"no": 9, "score": 5, "retry_count": 0}]},
         ), questions5())
         self.assertEqual(s["retry_history"], {})
-        self.assertEqual(s["retry_counts"], {1: coach.MAX_RETRIES})
+        self.assertEqual(s["retry_counts"], {})  # 횟수는 기록 개수로 계산 (파일의 9 는 쓰지 않음, E-5)
+        self.assertEqual(set(s["retry_unreadable"]), {"0", "6", "x"})  # 모르는 질문 번호의 기록도 버리지 않고 원본 보존 (E-5)
         self.assertEqual(s["understanding"], 100)
         self.assertEqual(s["last_suggest"], [("회사", "좋은 질문")])
         self.assertEqual((s["clue_round"], s["clue_set"]), (3, None))  # 모르는 질문 번호면 실마리를 새로 찾는다
@@ -340,10 +345,11 @@ class PickCluesTest(unittest.TestCase):
         self.assertEqual([c["no"] for c in clues], [1, 2])
         self.assertEqual({c["criterion"] for c in clues}, {"specific"})  # 기준 점수가 같으면 CRITERIA 순서
 
-    def test_uses_latest_and_skips_used_up(self):
+    def test_uses_latest_and_keeps_many_retries(self):
+        """재도전을 여러 번 한 답도 실마리 후보다 (E-4B: 3번 다 쓴 답 제외 규칙 삭제)."""
         ev = evaluation([(2,) * 4, (3,) * 4, (4,) * 4, (5,) * 4, (5,) * 4])  # 8 · 12 · 16 · 20 · 20
-        clues = coach.pick_clues(ev, retries={1: attempt(5, 5, 5, 4)}, retry_counts={2: coach.MAX_RETRIES})
-        self.assertEqual([(c["no"], c["score"]) for c in clues], [(3, 16), (1, 19)])
+        clues = coach.pick_clues(ev, retries={1: attempt(5, 5, 5, 4)}, retry_counts={2: 5})
+        self.assertEqual([(c["no"], c["score"], c["retry_count"]) for c in clues], [(2, 12, 5), (3, 16, 0)])
 
     def test_all_perfect(self):
         self.assertEqual(coach.pick_clues(evaluation([(5,) * 4] * 5)), [])
@@ -399,14 +405,14 @@ class KnownBehaviorTest(unittest.TestCase):
         answers = [raw_answer(1, check="ab")] + [raw_answer(i) for i in range(2, 6)]
         self.assertEqual(coach.summarize_evaluation(raw_eval(answers), questions5())["answers"][0]["check"], ["a", "b"])
 
-    def test_retry_counts_not_derived_from_history(self):
-        """#6 retry_counts 가 없는 리포트는 재도전 기록이 있어도 횟수가 0 으로 복원된다."""
+    def test_retry_counts_derived_from_history(self):
+        """#6 (E-5 에서 해결) retry_counts 가 없는 리포트도 횟수를 재도전 기록 개수로 계산한다 (파일 값은 쓰지 않음)."""
         session = {"messages": [{"role": "user", "content": "답", "q": 0}],
                    "evaluation": raw_eval([raw_answer(i, 2, 2, 2, 2) for i in range(1, 6)]),
                    "retry_history": {"1": [{"answer": "다시", "specific": 4, "relevance": 4, "structure": 4,
                                             "evidence": 4, "weak": ""}]}}
         s = coach.rebuild_session(session, questions5())
-        self.assertEqual((len(s["retry_history"][1]), s["retry_counts"]), (1, {}))
+        self.assertEqual((len(s["retry_history"][1]), s["retry_counts"]), (1, {1: 1}))
 
 
 if __name__ == "__main__":

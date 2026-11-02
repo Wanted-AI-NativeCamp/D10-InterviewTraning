@@ -90,8 +90,15 @@ class V1SupportedTest(unittest.TestCase):
                     clue_set=s["clue_set"], clue_round=s["clue_round"], memo=None, verdict_open=False,
                     practice=parsed["session"].get("practice") or [], past_hidden=parsed["session"].get("past_hidden") or [],
                 )
-                self.assertEqual(data_of(again), data_of(text))
-                self.assertEqual(again, text)
+                # E-5: 기존 칸 값은 모두 같고, 더한 칸(revision · 재도전 attempt_id)만 늘어난다. 사람이 읽는 본문은 그대로
+                new = data_of(again)
+                self.assertEqual(new.pop("revision"), coach.REPORT_DATA_REVISION)
+                for no, attempts in new["session"]["retry_history"].items():
+                    ids = [a.pop("attempt_id") for a in attempts]
+                    self.assertEqual(ids, [f"q{no}-a{n}" for n in range(1, len(ids) + 1)])  # v1 은 순서로 ID
+                self.assertEqual(new, data_of(text))
+                body = coach.REPORT_DATA_RE.sub("", again)
+                self.assertEqual(body, coach.REPORT_DATA_RE.sub("", text))
 
 
 class V1PartialTest(unittest.TestCase):

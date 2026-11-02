@@ -1,4 +1,5 @@
 # Streamlit 화면만. 프롬프트는 prompts.py, AI 호출은 llm.py, 계산은 coach.py.
+import contextlib
 import html
 import itertools
 import json
@@ -13,6 +14,8 @@ import pandas as pd
 import streamlit as st
 
 import coach
+import error_log
+import llm
 from llm import LLMError, ask_json
 from prompts import (
     EVAL_SCHEMA,
@@ -343,17 +346,78 @@ if not (state.stage == "start" and state.get("start_mode") == "resume"):
 AVATARS = {"assistant": ":material/support_agent:", "user": ":material/person:"}
 
 
-def call_ai(spinner_text: str, instructions: str, user_input: str, schema: dict, name: str, store) -> bool:
-    """AI를 한 번 부르고, 결과를 받자마자 store(결과) 로 저장한다. 실패하면 한국어 한 줄 에러.
+def error_session_id() -> str:
+    """오류 기록의 세션 ID. 처음 필요할 때 만들고, reset() 이 세션 상태를 비우면 새 면접 세션에서 새로 만든다."""
+    if "error_session_id" not in st.session_state:  # 없을 때만 만든다 (같은 면접 세션 동안 유지)
+        st.session_state.error_session_id = error_log.new_session_id()
+    return st.session_state.error_session_id
+
+
+def record_ai_event(kind: str, source: str, *, attempt: int, status: str, codes=None, meta=None):
+    """AI 호출 실패 · 복구 한 건을 오류 로그에 남긴다. 기록은 실패해도 예외를 내지 않으므로 화면 흐름에 영향이 없다.
+    답변 · AI 응답 글 · 예외 메시지는 넘기지 않는다. attempt 는 앱 수준 시도 회차 (SDK 내부 재시도는 알 수 없어 세지 않는다)."""
+    meta = {"model": os.getenv("OPENAI_MODEL") or llm.DEFAULT_MODEL, **(meta or {})}
+    error_log.record_error(
+        kind, source, session_id=error_session_id(), attempt=attempt, status=status, codes=codes,
+        meta={k: v for k, v in meta.items() if v is not None},  # 없는 값은 넘기지 않는다 (dropped 를 늘리지 않게)
+    )
+
+
+# 평가 응답 검증 실패 (E-3). 기존 API 오류 문구와 따로 둔다.
+INVALID_MESSAGES = {
+    "evaluation": "평가 결과를 확인하지 못했어요. 잠시 뒤 다시 평가받아 주세요.",
+    "retry": "채점 결과를 확인하지 못했어요. 잠시 뒤 다시 채점해 주세요.",
+}
+
+# 앱 수준 자동 재시도 (E-4A): 응답 내용이 잘못된 경우만 최대 1번 더 부른다.
+# 연결 · 시간 초과 · 서버 · 호출 제한 오류는 OpenAI SDK 가 이미 2번 더 시도하므로 앱은 다시 부르지 않는다
+# (클릭 1번의 실제 HTTP 요청: 최대 4번 = 첫 호출 1 + 앱 재시도 1회 안의 SDK 시도 3).
+AUTO_RETRY_KINDS = {"response_parse", "eval_validation"}
+AUTO_RETRY_SOURCES = {"interviewer", "evaluation", "retry"}  # 전략 · 형광펜 · 마지막 질문은 제외 (D5)
+MAX_APP_ATTEMPTS = 2
+RETRY_SPINNER = "응답을 한 번 더 확인하고 있어요."
+
+
+def run_ai(spinner_text: str, attempt_once, source: str, question_no: int | None = None, container=None):
+    """attempt_once() 로 AI 를 부르고 (평가 · 재도전은 그 안에서 검증 · 저장), (성공 여부, 결과, 실패 문구) 를 돌려준다.
+    응답 형식 오류 · 평가 검증 실패만 1번 더 부른다. 두 번째 시도의 오류는 유형과 상관없이 다시 부르지 않는다.
+    기록: 첫 실패 retrying(1회차) → 재시도 성공 recovered(2회차) 또는 최종 실패 failed(2회차). 재시도 대상이 아니면 failed(1회차)."""
+    retried = None
+    for attempt in range(1, MAX_APP_ATTEMPTS + 1):
+        try:
+            with container if container is not None else contextlib.nullcontext(),                     st.spinner(spinner_text if attempt == 1 else RETRY_SPINNER):
+                result = attempt_once()
+        except LLMError as e:
+            kind, message, codes = e.kind, str(e), [e.code] if e.code else None
+            meta = {"http_status": e.http_status, "exception": e.exception}
+        except coach.EvaluationInvalid as e:
+            kind, message, codes = "eval_validation", INVALID_MESSAGES[source], e.codes
+            meta = {"item_count": len(e.codes)}
+        else:
+            if retried:
+                record_ai_event(retried, source, attempt=attempt, status="recovered", meta={"question_no": question_no})
+            return True, result, None
+        again = attempt < MAX_APP_ATTEMPTS and source in AUTO_RETRY_SOURCES and kind in AUTO_RETRY_KINDS
+        record_ai_event(kind, source, attempt=attempt, status="retrying" if again else "failed", codes=codes,
+                        meta={**meta, "question_no": question_no})
+        if not again:
+            return False, None, message
+        retried = kind
+    return False, None, None  # 닿지 않음 (마지막 시도는 항상 위에서 돌아간다)
+
+
+def call_ai(spinner_text: str, instructions: str, user_input: str, schema: dict, name: str, store,
+            question_no: int | None = None) -> bool:
+    """AI를 부르고, 결과를 받자마자 store(결과) 로 저장한다. 실패하면 한국어 한 줄 에러 + 오류 기록.
     Streamlit 은 응답을 기다리는 동안 다른 버튼을 누르면 실행을 멈추고 다시 시작한다.
-    저장을 화면 그리기 뒤로 미루면 받은 결과를 버리고 다시 호출하게 돼서, spinner 안에서 바로 저장한다."""
-    try:
-        with st.spinner(spinner_text):
-            store(ask_json(instructions, user_input, schema, name))
-    except LLMError as e:
-        st.error(str(e))
-        return False
-    return True
+    저장을 화면 그리기 뒤로 미루면 받은 결과를 버리고 다시 호출하게 돼서, spinner 안에서 바로 저장한다.
+    평가 · 재도전 store 는 맨 앞에서 검증하고 통과하지 못하면 EvaluationInvalid 를 낸다 → 아무것도 바뀌지 않는다.
+    자동 재시도는 run_ai (store 는 성공한 응답으로 한 번만 불린다)."""
+    ok, _, message = run_ai(spinner_text, lambda: store(ask_json(instructions, user_input, schema, name)),
+                            name, question_no)
+    if not ok:
+        st.error(message)
+    return ok
 
 
 def question_message(index: int) -> dict:
@@ -443,6 +507,7 @@ NO_TAG = "태그 없음"
 PASTE_LIMITS = {
     "f_experience": coach.MAX_EXPERIENCE_CHARS,
     "retry_answer_": coach.MAX_ANSWER_CHARS,
+    "pending_edit_text": coach.MAX_ANSWER_CHARS,
     "memo_try_": coach.MAX_ANSWER_CHARS,
     "memo_draft_": coach.MAX_ANSWER_CHARS,
     "last_question_input": coach.MAX_LAST_QUESTION_CHARS,
@@ -584,6 +649,26 @@ def activate_report(fid: str):
     state.f_experience = state.f_experience[: coach.MAX_EXPERIENCE_CHARS]
 
 
+# 리포트 복원 안내 (E-5). 손상된 데이터는 0점으로 채우지 않고 원본을 남긴 채 읽을 수 있는 것만 불러온다.
+RESTORE_EVAL_UNREADABLE = "평가 데이터를 읽지 못해 질문과 답변만 불러왔어요. 다시 평가받을 수 있어요."
+RESTORE_RETRY_UNREADABLE = "일부 재도전 평가를 읽지 못했어요. 답변은 보존했지만 해당 점수는 반영하지 않았어요."
+
+
+def report_restore_problems(problems: dict) -> list[str]:
+    """복원하며 찾은 문제를 오류 로그에 남기고 화면 안내 문장을 돌려준다 (문제 코드 · 개수만, 답 · 평가 글은 넘기지 않음)."""
+    warnings = []
+    if problems["evaluation"]:
+        error_log.record_error("restore_validation", "restore", session_id=error_session_id(), codes=problems["evaluation"],
+                               meta={"item_count": len(problems["evaluation"])})
+        warnings.append(RESTORE_EVAL_UNREADABLE)
+    if problems["retry_unreadable"]:
+        if problems["retry_codes"]:  # 이번에 새로 읽지 못한 기록이 있을 때만 기록 (지난번에 남겨 둔 것은 다시 세지 않음)
+            error_log.record_error("restore_validation", "restore", session_id=error_session_id(),
+                                   codes=sorted(set(problems["retry_codes"])), meta={"item_count": len(problems["retry_codes"])})
+        warnings.append(RESTORE_RETRY_UNREADABLE)
+    return warnings
+
+
 def resume_without_interview(previous: dict, name, job, company, company_desc, experience, notice: str | None = None):
     """면접을 다시 하지 않고 리포트의 결과로 같은 회차를 이어 간다 (면접이 끝난 상태로 시작).
     시작 화면에서 부르므로 시작 화면 코드보다 위에 둔다. 개발용 모의 데이터도 이 길로 연다."""
@@ -607,10 +692,13 @@ def resume_without_interview(previous: dict, name, job, company, company_desc, e
     restore_precheck(previous["precheck"])
     state.q_index = coach.TOTAL_QUESTIONS
     state.follow_ups = 0
-    for key in ("messages", "evaluation", "retries", "retry_history", "retry_counts", "last_suggest", "last_question", "understanding"):
+    for key in ("messages", "evaluation", "retries", "retry_history", "retry_counts", "last_suggest", "last_question", "understanding",
+                "retry_unreadable", "evaluation_unreadable"):
         state[key] = session[key]
+    state.retry_pending = dict(session["latest_unscored"])  # 채점받지 못한 최신 답: 재도전 칸에 다시 채운다 (E-4A 와 같은 자리)
     state.highlights, state.strategies = {}, {}
-    state.memo_edits, state.memo_reviews = {}, {}  # 검토 내역은 retry_history 의 몇 번째인지라 새 기록과 맞지 않는다
+    state.memo_edits, state.memo_reviews = {}, {}  # 암기 탭 검토 내역은 세션에만 있다 (리포트에 남기지 않음)
+    warnings = report_restore_problems(session["problems"])
     # 실마리: 리포트에 저장돼 있으면 그 회차 · 목록에서 이어 간다 (없으면 1회차 · 새로 찾기)
     state.pop("clue_set", None)
     if session["clue_set"] is not None:
@@ -620,6 +708,7 @@ def resume_without_interview(previous: dict, name, job, company, company_desc, e
     state.same_questions = True
     state.open_eval = True            # 평가 탭부터 보여 준다
     state.notice = notice or f"{previous['round']}회차 결과를 불러왔어요. 면접 없이 평가 · 재도전 · 암기 · 리포트를 이어서 할 수 있어요."
+    state.notice_warnings = warnings
     state.stage = "done"
     st.rerun()
 
@@ -1036,6 +1125,8 @@ if state.stage in ("pick", "start"):
                     data = coach.parse_report(f.getvalue().decode("utf-8", errors="replace"))
                 except ValueError as e:
                     errors[f.file_id] = f"{f.name}: {e}"
+                    # 오류 기록에는 유형만 (파일 이름 · 내용 · 문구는 넘기지 않는다). 올린 파일 · 지금 세션은 바꾸지 않는다
+                    error_log.record_error("restore_parse", "restore", session_id=error_session_id())
                     continue
                 if not PERSONAS.get(data["profile"]["job"]):  # 직군은 리포트를 따라가되, 면접관이 없는 직군은 열 수 없다
                     errors[f.file_id] = f"{f.name}: '{data['profile']['job']}' 직군 모드는 아직 준비 중이에요."
@@ -1191,6 +1282,7 @@ if state.stage in ("pick", "start"):
                     state.pop("clue_set", None); state.pop("clue_round", None)  # 새 평가에서 실마리를 다시 찾는다
                     state.retries = {}
                     state.retry_history = {}
+                    state.retry_pending, state.retry_unreadable, state.evaluation_unreadable = {}, {}, []
                     state.memo_edits, state.memo_reviews = {}, {}  # 고친 대본 · 검토 내역은 질문이 바뀌면 맞지 않는다
                     state.last_question = None
                     state.last_suggest = None
@@ -1250,11 +1342,14 @@ for state_key, empty in (
     ("highlights", {}), ("last_suggest", None), ("last_question", None), ("previous", None), ("round", 1),
     ("strategies", {}), ("retry_counts", {}), ("verdict_open", False), ("memo_results", {}), ("memo_best", {}),
     ("speak_logs", {}), ("reports", {}), ("retry_history", {}), ("memo_edits", {}), ("memo_reviews", {}),
+    ("retry_pending", {}), ("retry_unreadable", {}), ("evaluation_unreadable", []),
 ):
     if state_key not in state:  # 이 기능이 생기기 전에 시작한 세션도 열리게
         state[state_key] = empty
 if state.get("notice"):
     st.info(state.pop("notice"))
+for warning in state.pop("notice_warnings", None) or []:
+    st.warning(warning)
 
 
 def memo_summary() -> dict:
@@ -1309,6 +1404,8 @@ def build_current_report(ev: dict, updated_at: str | None = None) -> str:
         verdict_open=bool(state.get("verdict_open")),
         practice=current_practice(),
         past_hidden=[{"question": q, "round": r} for q, r in sorted(hidden_past())],
+        latest_unscored=state.get("retry_pending", {}), retry_unreadable=state.get("retry_unreadable", {}),
+        evaluation_unreadable=state.get("evaluation_unreadable", []),
     )
 
 
@@ -1571,8 +1668,13 @@ def show_perfect_hints(ev: dict):
             if hint["rewrite"]:
                 st.markdown("**힌트 답변**")
                 st.markdown(f"> {hint['rewrite']}")
-            for item in hint["check"]:
+            # 기본 2개 + 나머지는 [더 보기] (D6). AI 가 쓴 순서를 중요도로 보지 않고 받은 순서 그대로 보여 준다
+            for item in hint["check"][:coach.SHOW_ITEMS]:
                 st.markdown(f":material/fact_check: **면접 전 확인:** {item}")
+            if len(hint["check"]) > coach.SHOW_ITEMS:
+                with st.expander(f"더 보기 · {len(hint['check']) - coach.SHOW_ITEMS}개"):
+                    for item in hint["check"][coach.SHOW_ITEMS:]:
+                        st.markdown(f":material/fact_check: **면접 전 확인:** {item}")
 
 
 def show_clues(ev: dict):
@@ -1583,13 +1685,6 @@ def show_clues(ev: dict):
     if "clue_set" not in state:
         state.clue_set = coach.pick_clues(ev, retries=retries, retry_counts=retry_counts)
     clues = state.clue_set
-    # 만점은 아니지만 재도전을 모두 써서 실마리로 고르지 않은 답 (최신 점수 기준)
-    used_up = [a["no"] for a in coach.latest_answers(ev, retries)
-               if a["score"] < coach.ANSWER_MAX and retry_counts.get(a["no"], 0) >= coach.MAX_RETRIES]
-    if not clues and used_up:
-        st.info(f":material/flag: 남은 질문 {', '.join(map(str, used_up))}번은 재도전을 {coach.MAX_RETRIES}번 모두 했어요. "
-                "리포트를 받아 다음 회차에서 이어서 연습하거나, 암기 탭에서 말하기 연습으로 다듬어 보세요.")
-        return
     if not clues:
         st.success(":material/celebration: 모든 답이 20점 만점이에요.")
         if st.button(":material/lightbulb: 힌트 확인하기", key="perfect_hints"):
@@ -1607,9 +1702,7 @@ def show_clues(ev: dict):
              color="green" if progress["done"] else "blue")
     if state.pop("clue_updated", False):
         st.success(f":material/update: 실마리가 **{clue_round}회차**로 업데이트됐어요. 재도전 점수를 넣은 최신 점수에서 다시 찾았어요.")
-    st.caption(f"점수가 가장 낮은 답 {len(clues)}개예요. 여기부터 고치면 점수가 가장 많이 올라요."
-               + (f" 재도전을 {coach.MAX_RETRIES}번 모두 한 질문({', '.join(map(str, used_up))}번)은 빼고 골랐어요."
-                  if used_up and clue_round > 1 else ""))
+    st.caption(f"점수가 가장 낮은 답 {len(clues)}개예요. 여기부터 고치면 점수가 가장 많이 올라요.")
     for clue, row in zip(clues, progress["rows"]):
         with st.container(border=True):
             st.markdown(
@@ -1619,22 +1712,16 @@ def show_clues(ev: dict):
             st.caption(clue["question"])
             if row["up"]:
                 st.success(f":material/trending_up: **역전 성공!** {row['before']} → {row['after']}점 (+{row['diff']})")
-            used = retry_counts.get(clue["no"], 0)  # 재도전 횟수 (MAX_RETRIES 까지)
-            left = used < coach.MAX_RETRIES
             if row["retried"] and not row["up"]:
-                more = "한 번 더 도전해 볼 수 있어요." if left else f"재도전을 {coach.MAX_RETRIES}번 모두 했어요."
-                st.info(f"재도전 완료 · {row['before']} → {row['after']}점 ({row['diff']:+d}). {more}")
+                st.info(f"재도전 완료 · {row['before']} → {row['after']}점 ({row['diff']:+d}). 한 번 더 도전해 볼 수 있어요.")
             elif not row["up"]:
                 st.markdown(f"**가장 약한 점:** {clue['weak']}")
                 st.caption(f"'역전의 기회 잡기' 를 누르면 아래에서 질문 {clue['no']} 의 형광펜 · 전략 가이드를 보며 다시 답할 수 있어요.")
             if not row["up"]:
-                # 남은 기회를 버튼에 보여 준다. 0이면 꺼진 버튼 (사용자 요청 — CLAUDE.md 'disabled 금지' 의 예외, 이유는 버튼 글자로)
-                remaining = coach.MAX_RETRIES - used
+                # 재도전 횟수 제한 없음 (E-4B): 횟수 표시 · 꺼진 버튼 없이 언제나 누를 수 있다
                 name = "한 번 더 도전하기" if row["retried"] else "역전의 기회 잡기"
-                label = f":material/replay: {name} · 남은 기회 {remaining}/{coach.MAX_RETRIES}"
-                if st.button(label, key=f"clue_retry_{clue['no']}", disabled=not left,
-                             type="secondary" if row["retried"] or not left else "primary",
-                             help=None if left else "이 질문은 재도전 기회를 모두 썼어요. 다음 회차 면접에서 이어서 연습해 보세요."):
+                if st.button(f":material/replay: {name}", key=f"clue_retry_{clue['no']}",
+                             type="secondary" if row["retried"] else "primary"):
                     state.go_retry_no = clue["no"]
                     state.go_tab = RETRY_TAB
                     state.scroll_retry = True  # 아래 '답변 재도전' 으로 내려간다
@@ -1836,7 +1923,9 @@ def record_retry(no: int, attempt: dict, original_score: int):
     """재도전 하나를 기록에 더하고, 반영할 재도전(최고 점수)을 다시 고른다 (고르는 건 coach.reflected_retry).
     재도전 탭 · 암기 탭의 재도전 검토가 같이 쓴다."""
     history = state.setdefault("retry_history", {}).setdefault(no, [])
+    attempt["attempt_id"] = coach.next_attempt_id(no, history, state.get("retry_unreadable", {}).get(no, []))
     history.append(attempt)
+    state.retry_counts[no] = len(history)  # 횟수는 기록 개수 (제한 없음 · 실마리 진행 · 옛 리포트 호환용)
     best = coach.reflected_retry(original_score, history)
     if best:
         state.retries[no] = best
@@ -1941,13 +2030,11 @@ def show_retry(ev: dict):
         scroll_to_anchor("retry-answer")
     # 고르는 칸은 지금 점수(재도전 최고 점수 반영) 낮은 순 · 비교 기준(last)은 면접 때 처음 답
     original = {a["no"]: a for a in ev["answers"]}
-    counts = state.get("retry_counts", {})
 
-    def label(a: dict) -> str:
+    def label(a: dict) -> str:  # 재도전 횟수 제한 · 카운터 없음 (E-4B)
         first = original[a["no"]]["score"]
         score = f"{first} → {a['score']}" if a["score"] != first else f"{first}"
-        return (f"질문 {a['no']} · {score}/{coach.ANSWER_MAX}점 · 재도전 {counts.get(a['no'], 0)}/{coach.MAX_RETRIES} · "
-                f"{a['question']}")
+        return f"질문 {a['no']} · {score}/{coach.ANSWER_MAX}점 · {a['question']}"
 
     labels = {a["no"]: label(a) for a in coach.retry_order(coach.latest_answers(ev, state.get("retries", {})))}
     no = st.selectbox("다시 답할 질문 (지금 점수 낮은 순)", list(labels), format_func=labels.get, key="retry_no")
@@ -1969,33 +2056,44 @@ def show_retry(ev: dict):
 
     def show_answer_box():
         st.markdown("**이제, 당신의 차례입니다.**")
+        # 채점하지 못한 답 (E-4A, 세션 안에서만): 다른 질문으로 갔다 와도 칸에 다시 채운다.
+        # Streamlit 은 화면에 그리지 않은 칸의 값을 지우므로 질문별로 따로 보관한다.
+        answer_key = f"retry_answer_{no}"
+        unscored = state.setdefault("retry_pending", {})
+        if no in unscored and answer_key not in state:
+            state[answer_key] = unscored[no]
+
+        def keep_unscored():  # 보관 중인 답을 고치면 고친 글을 보관한다
+            if no in unscored:
+                unscored[no] = state[answer_key]
+
         new_answer = st.text_area(
-            "다시 답하기", height=180, key=f"retry_answer_{no}", max_chars=coach.MAX_ANSWER_CHARS
+            "다시 답하기", height=180, key=answer_key, max_chars=coach.MAX_ANSWER_CHARS, on_change=keep_unscored
         )
-        used = state.retry_counts.get(no, 0)
-        st.caption(f"이 질문 재도전 {used}/{coach.MAX_RETRIES}번")
+        if no in unscored:
+            st.info("채점하지 못한 답변이 남아 있어요. 다시 채점할 수 있어요.")
         if st.button("다시 채점", type="primary"):
             if not new_answer.strip():
                 st.info("다시 쓴 답을 적은 뒤 눌러 주세요.")
-            elif used >= coach.MAX_RETRIES:
-                st.info(
-                    f"이 질문은 재도전을 {coach.MAX_RETRIES}번 모두 했어요. 다른 질문에 도전하거나, "
-                    "리포트를 받아 다음 회차에서 이어서 연습해 보세요."
-                )
+            elif " ".join(new_answer.split()) in graded_answers(no):
+                # 같은 질문에서 이미 채점에 성공한 답 (면접 때 답 · 재도전 기록): AI 를 다시 부르지 않는다 (기록 · 최고 점수 그대로)
+                st.info("이미 채점받은 답변이에요. 답변을 수정하면 다시 채점받을 수 있어요.")
             else:
                 def store(raw):
-                    attempt = {"answer": new_answer.strip(), **coach.summarize_retry(raw)}
+                    attempt = {"answer": new_answer.strip(), **coach.checked_retry(raw)}  # 검증 실패면 여기서 멈춤
                     record_retry(no, attempt, last["score"])
-                    state.retry_counts[no] = used + 1
+                    unscored.pop(no, None)  # 채점 성공: 보관한 답 정리
                     if attempt["score"] > last["score"]:
                         state.scroll_top = True  # 역전 성공: 결과가 맨 위에 오므로 페이지 맨 위로
 
                 if call_ai(
                     "다시 쓴 답을 채점하고 있어요...",
                     coach.build_retry(profile, question, before, last["weak"]),
-                    new_answer.strip(), RETRY_SCHEMA, "retry", store,
+                    new_answer.strip(), RETRY_SCHEMA, "retry", store, question_no=no,
                 ):
                     st.rerun()
+                else:
+                    unscored[no] = new_answer  # 실패: 쓴 답을 질문별로 보관 (기록 · 횟수 · 최고 점수는 그대로)
 
     def show_result():
         # 점수가 오르면 '역전 성공!' 은 맨 위 역전의 실마리 카드에만 띄운다 (여기서는 후 점수 +n 으로만 보여 줌)
@@ -2785,35 +2883,34 @@ def script_dialog(no, result_key: str, original: str, text: str, ev: dict | None
     if practice:
         review_col.caption("다른 질문은 연습만 해요. 점수는 이번 회차 면접 답으로만 계산해요.")
     elif review_col.button(":material/replay: 수정하고 재도전 검토 받기", key=f"memo_review_{result_key}", type="primary", width="stretch"):
-        used = state.retry_counts.get(no, 0)
         if not draft.strip():
             st.info("대본을 적은 뒤 눌러 주세요.")
         elif not ev:
             st.info("위원 4명에게 평가받은 뒤에 재도전 검토를 받을 수 있어요. :material/forum: 면접 탭의 '위원 4명에게 평가받기' 를 눌러 주세요.")
-        elif used >= coach.MAX_RETRIES:
-            st.info(f"이 질문은 재도전 검토를 {coach.MAX_RETRIES}번 모두 받았어요. 고친 대본은 저장해서 연습할 수 있어요.")
         elif " ".join(draft.split()) in graded_answers(no):
-            st.info("이미 채점받은 대본이라 다시 채점하지 않았어요 (재도전 기회는 그대로예요). "
+            st.info("이미 채점받은 대본이라 다시 채점하지 않았어요. "
                     "대본을 고친 뒤 다시 누르거나, 연습만 하려면 '고친 대본 저장' 을 눌러 주세요.")
         else:
             last = ev["answers"][no - 1]
             new_answer = draft.strip()
 
             def store(raw):
+                # 검증을 먼저: 실패하면 고친 대본 · 기록 · 횟수 모두 그대로 (쓰던 글은 입력 칸 · memo_draft_kept 에 남음)
+                attempt = {"answer": new_answer, **coach.checked_retry(raw)}
                 state.memo_edits[result_key] = new_answer
-                attempt = {"answer": new_answer, **coach.summarize_retry(raw)}
                 record_retry(no, attempt, last["score"])
-                state.retry_counts[no] = used + 1
                 state.memo_results.pop(result_key, None)
-                state.memo_reviews[result_key] = len(state.retry_history[no]) - 1  # 몇 번째 재도전인지
+                state.memo_reviews[result_key] = attempt["attempt_id"]  # 순서가 아니라 기록 ID 로 연결 (E-5)
                 kept.pop(result_key, None)
 
             if call_ai(
                 "고친 대본을 채점하고 있어요...",
                 coach.build_retry(profile, state.questions[no - 1], coach.answer_text(state.messages, no - 1), last["weak"]),
-                new_answer, RETRY_SCHEMA, "retry", store,
+                new_answer, RETRY_SCHEMA, "retry", store, question_no=no,
             ):
                 st.rerun()
+            else:
+                kept[result_key] = draft  # 실패: 쓰던 대본을 보관 (창을 닫아도 남음). 대본 · 점수 · 횟수는 그대로
     # 되돌리기는 고친 글을 지우므로 한 번 더 묻는다 (지운 글은 되살릴 수 없음)
     ask_key = f"memo_undo_ask_{result_key}"
     if undo_col.button(":material/undo: 원래 대본으로 되돌리기", key=f"memo_undo_{result_key}", width="stretch"):
@@ -2832,17 +2929,18 @@ def script_dialog(no, result_key: str, original: str, text: str, ev: dict | None
             st.rerun()
     if not practice:
         st.caption(
-            f"재도전 검토는 :material/replay: 재도전 탭과 같은 기준으로 채점하고, 질문당 {coach.MAX_RETRIES}번까지예요 "
-            f"(지금 {state.retry_counts.get(no, 0)}번). 처음 점수보다 높으면 가장 높은 점수가 종합 점수 · 리포트에 반영돼요. "
+            "재도전 검토는 :material/replay: 재도전 탭과 같은 기준으로 채점해요. "
+            "처음 점수보다 높으면 가장 높은 점수가 종합 점수 · 리포트에 반영돼요. "
             "저장 · 검토 · 되돌리기를 마치면 이 창이 닫혀요."
         )
 
 
 def show_review_result(no: int, result_key: str, ev: dict | None):
     """'수정하고 재도전 검토 받기' 결과를 바로 아래에: 재도전 탭의 결과와 같은 구조 (show_retry_result)."""
-    index = state.memo_reviews.get(result_key)
     history = state.get("retry_history", {}).get(no, [])
-    if not ev or not isinstance(index, int) or not 0 <= index < len(history):
+    review_id = state.memo_reviews.get(result_key)
+    index = next((i for i, a in enumerate(history) if a.get("attempt_id") == review_id), None)
+    if not ev or index is None:
         return
     with st.container(border=True):
         st.markdown(f"**:material/fact_check: 재도전 검토 내역** · {index + 1}번째 재도전")
@@ -3172,7 +3270,9 @@ with chat_tab:
                 st.rerun()
         elif st.button("위원 4명에게 평가받기", type="primary"):
             def store(raw):
-                state.evaluation = coach.summarize_evaluation(raw, state.questions)
+                state.evaluation = coach.checked_evaluation(raw, state.questions)  # 검증 실패면 저장 없이 멈춤
+                # 부분 복원 뒤 다시 평가받은 경우: 남아 있던 재도전 기록으로 최고 점수를 다시 고른다 (보통은 기록이 없음)
+                state.retries = coach.reflected_retries(state.evaluation, state.get("retry_history", {}))
                 state.pop("clue_set", None); state.pop("clue_round", None)
                 state.go_tab = EVAL_TAB  # 평가가 끝나면 평가 탭으로 바로 이동
 
@@ -3252,31 +3352,83 @@ if state.stage == "done":
             st.info(f"면접은 끝났어요. '{next_button}' 버튼을 눌러 주세요.")
     st.stop()
 
-answer = st.chat_input(f"답을 적어 주세요 ({coach.MAX_ANSWER_CHARS:,}자까지)", max_chars=coach.MAX_ANSWER_CHARS)
-if answer is not None:
-    if not answer.strip():
-        with live:
+PENDING_MESSAGE = "답변을 보관했어요. 다시 보내거나 수정할 수 있어요."
+PENDING_EDIT_KEY = "pending_edit_text"
+
+
+def clear_pending_answer():
+    for key in ("pending_answer", "pending_editing", PENDING_EDIT_KEY):
+        state.pop(key, None)
+
+
+def show_pending_answer(pending: dict, typed: str | None) -> str | None:
+    """면접관에게 전달하지 못한 답 (E-4A). [다시 시도] · [수정한 답변 보내기] 를 누르면 보낼 글을 돌려준다.
+    보관한 답은 사용자가 이 두 버튼으로 보낼 때만 바뀐다. 입력창에 새로 쓴 글은 바로 보내지 않고 수정 칸에 옮겨 둔다."""
+    moved = typed is not None and bool(typed.strip())
+    if moved:
+        state[PENDING_EDIT_KEY] = typed  # 수정 칸을 그리기 전이라 값을 넣을 수 있다
+        state.pending_editing = True
+    with st.chat_message("user", avatar=AVATARS["user"]):
+        st.markdown(pending["text"])
+        st.caption(":material/schedule_send: 아직 면접관에게 전달되지 않은 답변이에요.")
+    if pending.get("error"):
+        st.error(pending["error"])
+    st.info(PENDING_MESSAGE)
+    if moved:
+        st.caption("새로 쓴 답변은 아래 수정 칸에 옮겨 두었어요. '수정한 답변 보내기' 를 눌러야 바뀌어요.")
+    if state.get("pending_editing"):
+        if PENDING_EDIT_KEY not in state:
+            state[PENDING_EDIT_KEY] = pending["text"]
+        text = st.text_area("답변 수정", key=PENDING_EDIT_KEY, height=160, max_chars=coach.MAX_ANSWER_CHARS)
+        send_col, cancel_col = st.columns(2)
+        if send_col.button("수정한 답변 보내기", key="pending_send_edit", type="primary", width="stretch"):
+            if text.strip():
+                return text
             st.info("답을 적은 뒤 보내 주세요.")
-        st.stop()
+        if cancel_col.button("수정 취소", key="pending_cancel_edit", width="stretch"):
+            state.pending_editing = False
+            state.pop(PENDING_EDIT_KEY, None)
+            st.rerun()
+        return None
+    retry_col, edit_col = st.columns(2)
+    if retry_col.button(":material/refresh: 다시 시도", key="pending_resend", type="primary", width="stretch"):
+        return pending["text"]
+    if edit_col.button(":material/edit: 답변 수정", key="pending_edit", width="stretch"):
+        state.pending_editing = True
+        st.rerun()
+    return None
 
-    with live:
-        with st.chat_message("user", avatar=AVATARS["user"]):
-            st.markdown(answer)
 
-    question = state.questions[state.q_index]
-    instructions = coach.build_interviewer(profile, question, state.follow_ups)
-    transcript = coach.format_transcript(state.messages + [{"role": "user", "content": answer}])
-
-    try:
-        with live, st.spinner("면접관이 답을 읽고 있어요..."):
-            result = ask_json(instructions, transcript, INTERVIEWER_SCHEMA, "interviewer")
-    except LLMError as e:
+def send_answer(text: str, show_bubble: bool):
+    """답 하나를 면접관에게 보낸다. AI 를 부르기 전에 답을 보관하고 (pending_answer), 성공했을 때만 대화 기록에 넣는다.
+    실패하면 보관한 답 · 오류 문구를 남기고 다음 화면에서 [다시 시도] · [답변 수정] 을 보여 준다 (질문은 넘어가지 않음)."""
+    q, follow_ups = state.q_index, state.follow_ups
+    pending = {"q": q, "follow_ups": follow_ups, "text": text}
+    state.pending_answer = pending
+    state.pending_editing = False
+    state.pop(PENDING_EDIT_KEY, None)
+    if show_bubble:
         with live:
-            st.error(str(e))
-        st.stop()
+            with st.chat_message("user", avatar=AVATARS["user"]):
+                st.markdown(text)
 
-    q = state.q_index
-    state.messages.append({"role": "user", "content": answer, "q": q})
+    question = state.questions[q]
+    instructions = coach.build_interviewer(profile, question, follow_ups)
+    transcript = coach.format_transcript(state.messages + [{"role": "user", "content": text}])
+    ok, result, message = run_ai(
+        "면접관이 답을 읽고 있어요...",
+        lambda: ask_json(instructions, transcript, INTERVIEWER_SCHEMA, "interviewer"),
+        "interviewer", container=live,
+    )
+    if not ok:
+        pending["error"] = message  # 다음 화면에서 보관한 답 아래에 보여 준다
+        st.rerun()
+    # 같은 답이 두 번 들어가지 않게: 지금 보관 중인 답이 이번에 보낸 답이고, 질문 위치가 그대로일 때만 반영한다
+    if state.get("pending_answer") is not pending or (state.q_index, state.follow_ups) != (q, follow_ups):
+        st.rerun()
+    clear_pending_answer()
+
+    state.messages.append({"role": "user", "content": text, "q": q})
     state.understanding = coach.clamp(result.get("understanding"), 0, 100)
     reply = str(result.get("reply", "")).strip()
     ai_wants_follow_up = bool(result.get("follow_up"))
@@ -3299,3 +3451,20 @@ if answer is not None:
             state.messages.append({"role": "assistant", "content": "면접을 마치겠습니다."})
             state.stage = "done"
     st.rerun()
+
+
+answer = st.chat_input(f"답을 적어 주세요 ({coach.MAX_ANSWER_CHARS:,}자까지)", max_chars=coach.MAX_ANSWER_CHARS)
+pending = state.get("pending_answer")
+if pending:
+    # 전달하지 못한 답이 있으면 그 답부터: 사용자가 [다시 시도] 또는 [수정한 답변 보내기] 를 눌렀을 때만 보낸다
+    with live:
+        to_send = show_pending_answer(pending, answer)
+    if to_send is None:
+        st.stop()
+    send_answer(to_send, show_bubble=to_send != pending["text"])
+elif answer is not None:
+    if not answer.strip():
+        with live:
+            st.info("답을 적은 뒤 보내 주세요.")
+        st.stop()
+    send_answer(answer, show_bubble=True)

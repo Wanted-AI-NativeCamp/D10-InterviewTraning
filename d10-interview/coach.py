@@ -53,7 +53,7 @@ MAX_ANSWER_CHARS = 1500
 MAX_EXPERIENCE_CHARS = 1000  # 내 경험은 모든 호출에 들어간다
 MAX_LAST_QUESTION_CHARS = 300
 MAX_MEMO_CHARS = 200
-MAX_RETRIES = 3  # 질문당
+MAX_RETRY_COUNT = 999_999  # 재도전 횟수 제한은 없다 (E-4B). 리포트에서 읽은 횟수의 이상한 값만 막는 안전 상한
 MAX_CHECKS = 2
 MAX_NEXT = 3
 LAST_ANGLES = ["회사", "직무", "성장"]  # 마지막 질문 3개의 관점 (이 순서)
@@ -62,6 +62,13 @@ PROMPT_BLANK = "___"
 # 리포트 끝에 숨겨 두는 데이터 (마크다운 주석이라 문서에는 안 보임). 다음 면접에서 다시 읽는다.
 REPORT_DATA_TAG = "interview-data"
 REPORT_DATA_VERSION = 1
+# 같은 version 1 안의 개정 (E-5): 재도전 기록의 attempt_id · 채점받지 못한 최신 답(latest_unscored) ·
+# 읽지 못한 재도전(retry_unreadable) · 읽지 못한 최초 평가(evaluation_unreadable) 칸을 더했다. 옛 앱은 모르는 칸을 무시한다.
+REPORT_DATA_REVISION = 2
+MAX_REPORT_BYTES = 5 * 1024 * 1024  # 리포트 파일 안전 한도. 넘으면 자르지 않고 불러오기를 거부한다
+MAX_ATTEMPTS_PER_QUESTION = 500     # 질문당 재도전 기록 안전 한도. 넘으면 자르지 않고 불러오기를 거부한다
+ATTEMPT_LISTS = ("retry_history", "retry_unreadable")  # _trim 의 목록 40개 한도를 쓰지 않는 칸
+ATTEMPT_ID = re.compile(r"^q([1-9])-a([1-9][0-9]{0,5})$")
 REPORT_DATA_RE = re.compile(r"<!--\s*" + REPORT_DATA_TAG + r"\s+(\{.*\})\s*-->", re.DOTALL)
 MAX_FIELD_CHARS = 2000  # 리포트에서 읽는 글 한 칸의 최대 길이
 MAX_ROUND = 999
@@ -121,7 +128,10 @@ def past_result(report: dict, index: int) -> dict:
     attempts = []
     for r in items if isinstance(items, list) else []:
         if isinstance(r, dict) and isinstance(r.get("answer"), str) and r["answer"].strip():
-            attempts.append({"answer": r["answer"].strip(), **summarize_retry(r)})
+            try:
+                attempts.append({"answer": r["answer"].strip(), **checked_retry(r)})
+            except EvaluationInvalid:
+                continue  # 읽지 못한 재도전은 점수 비교에 쓰지 않는다 (E-5)
     best = reflected_retry(score, attempts) if score is not None and attempts else None
     return {"answer": best["answer"], "score": best["score"]} if best else {"answer": first, "score": score}
 
@@ -376,11 +386,11 @@ def total_scores(evaluation: dict, retries: dict) -> dict:
 
 
 def reflected_retry(original_score: int, history: list[dict]) -> dict | None:
-    """최고 점수 반영: 처음 점수보다 높은 재도전 중 가장 높은 것 (같은 점수면 나중 것). 없으면 None (처음 점수 반영).
-    state.retries[no] 에는 이 값만 넣는다 → 종합 점수 · 판정 · 실마리 · 리포트가 모두 최고 점수를 쓴다."""
+    """최고 점수 반영: 처음 점수보다 높은 재도전 중 가장 높은 것 (같은 점수면 먼저 받은 것 — 기존 최고 답 유지).
+    없으면 None (처음 점수 반영). state.retries[no] 에는 이 값만 넣는다 → 종합 점수 · 판정 · 실마리 · 리포트가 모두 최고 점수를 쓴다."""
     best = None
     for attempt in history:
-        if attempt["score"] > original_score and (best is None or attempt["score"] >= best["score"]):
+        if attempt["score"] > original_score and (best is None or attempt["score"] > best["score"]):
             best = attempt
     return best
 
@@ -407,10 +417,9 @@ def pick_clues(evaluation: dict, count: int = MAX_CLUES, retries: dict | None = 
     retry_count 는 실마리를 찾은 때의 재도전 횟수 (그 뒤에 재도전했는지 clue_progress 가 본다)."""
     order = list(CRITERIA)
     retry_counts = retry_counts or {}
-    # 재도전을 MAX_RETRIES 번 모두 쓴 답은 더 고칠 수 없어서 실마리로 고르지 않는다
+    # 재도전 횟수 제한은 없다 (E-4B): 여러 번 재도전한 답도 실마리 후보다
     candidates = sorted(
-        (a for a in latest_answers(evaluation, retries)
-         if a["score"] < ANSWER_MAX and retry_counts.get(a["no"], 0) < MAX_RETRIES),
+        (a for a in latest_answers(evaluation, retries) if a["score"] < ANSWER_MAX),
         key=lambda x: (x["score"], x["no"]),
     )
     clues = []
@@ -962,8 +971,189 @@ def retry_order(answers: list[dict]) -> list[dict]:
 
 
 def summarize_retry(raw: dict) -> dict:
+    """옛 보정 방식 (점수를 범위 안으로 자르고 빠진 칸은 0점). 앱은 쓰지 않고 v1 기준 샘플 생성기 · 비교 테스트만 쓴다.
+    AI 응답 · 리포트 복원은 checked_retry (E-3 · E-5)."""
     scores = clamp_scores(raw)
     return {"scores": scores, "score": answer_score(scores), "weak": str(raw.get("weak", ""))}
+
+
+# AI 평가 응답 검증 (E-3). 원본의 구조 · 타입을 먼저 검사하고, 하나라도 어긋나면 저장하지 않는다.
+# 통과한 응답만 저장 모양으로 바꾸며, 이때 정수 점수의 범위 밖 값만 경계값으로 자른다 (CLAUDE.md '범위 밖이면 잘라 쓴다').
+# 빠진 점수 · 위원을 0점으로 채우거나 순서로 번호를 추측하지 않는다.
+# 문제 코드는 error_log.CODE 모양 (영문 + 경로, 값은 정수만) — 사용자 답변 · AI 응답 글은 들어가지 않는다.
+# 위원 내부 키: 화면 · 리포트는 한글 이름(PANEL_ROLES) 그대로, 검증 · 오류 기록 코드에만 영문 키를 쓴다.
+PANEL_KEYS = {
+    "실무 전문가": "practitioner",
+    "논리 분석가": "logician",
+    "커뮤니케이션 전문가": "communicator",
+    "채용 담당자": "recruiter",
+}
+EVAL_FIELDS = ("panel", "conflict", "agree", "answers", "next")
+SHOW_ITEMS = 2  # 평가 화면 목록의 기본 표시 개수 — 나머지는 [더 보기] (D6). 저장 데이터는 자르지 않는다
+
+
+class EvaluationInvalid(Exception):
+    """AI 평가 · 재도전 채점이 검증을 통과하지 못함. codes 는 오류 기록용 문제 코드 목록."""
+
+    def __init__(self, codes: list[str]):
+        super().__init__("evaluation response invalid")
+        self.codes = list(codes)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)  # True · 5.0 · "5" 는 정수가 아니다
+
+
+def _check_score(item: dict, field: str, path: str, codes: list):
+    """점수 칸: 있어야 하고 정수여야 한다. 범위는 검사하지 않는다 (저장할 때 checked_* 가 경계값으로 자른다)."""
+    if field not in item:
+        codes.append(f"field_missing:{path}")
+    elif not _is_int(item[field]):
+        codes.append(f"score_type:{path}")
+
+
+def _check_text(item: dict, field: str, path: str, codes: list):
+    """글 칸: 있어야 하고 문자열이어야 한다. 빈 문자열은 허용 (만점 답은 약한 점이 비어 온다)."""
+    if field not in item:
+        codes.append(f"field_missing:{path}")
+    elif not isinstance(item[field], str):
+        codes.append(f"text_type:{path}")
+
+
+def _check_text_list(value, path: str, codes: list):
+    if not isinstance(value, list):
+        codes.append(f"field_type:{path}")
+        return
+    codes.extend(f"text_type:{path}[{i}]" for i, v in enumerate(value) if not isinstance(v, str))
+
+
+def validate_evaluation(raw, questions: list[dict]) -> list[str]:
+    """AI 평가 원본 검사. 문제 코드 목록을 돌려준다 (빈 목록 = 통과)."""
+    if not isinstance(raw, dict):
+        return ["not_object:evaluation"]
+    codes = [f"field_missing:{f}" for f in EVAL_FIELDS if f not in raw]
+
+    panel = raw.get("panel")
+    if "panel" in raw and not isinstance(panel, list):
+        codes.append("field_type:panel")
+    elif isinstance(panel, list):
+        if len(panel) != len(PANEL_ROLES):
+            codes.append(f"panel_count:{len(panel)}")
+        seen = set()
+        for i, m in enumerate(panel):
+            if not isinstance(m, dict):
+                codes.append(f"not_object:panel[{i}]")
+                continue
+            key = PANEL_KEYS.get(m["role"]) if isinstance(m.get("role"), str) else None
+            if key is None:
+                codes.append(f"panel_role_unknown:panel[{i}]")
+                key = f"panel[{i}]"
+            elif key in seen:
+                codes.append(f"panel_role_duplicate:{key}")
+            seen.add(key)
+            _check_score(m, "score", f"{key}.score", codes)
+            _check_text(m, "against", f"{key}.against", codes)
+            _check_text(m, "good", f"{key}.good", codes)
+        codes += [f"panel_role_missing:{PANEL_KEYS[r]}" for r in PANEL_ROLES if PANEL_KEYS[r] not in seen]
+
+    for field in ("conflict", "agree"):
+        if field in raw and not isinstance(raw[field], str):
+            codes.append(f"text_type:{field}")
+
+    answers = raw.get("answers")
+    if "answers" in raw and not isinstance(answers, list):
+        codes.append("field_type:answers")
+    elif isinstance(answers, list):
+        if len(answers) != len(questions):
+            codes.append(f"answer_count:{len(answers)}")
+        numbers = set()
+        for i, a in enumerate(answers):
+            path = f"answers[{i}]"
+            if not isinstance(a, dict):
+                codes.append(f"not_object:{path}")
+                continue
+            no = a.get("no")
+            if "no" not in a:
+                codes.append(f"field_missing:{path}.no")
+            elif not _is_int(no):
+                codes.append(f"answer_no_type:{path}")
+            elif not 1 <= no <= len(questions):
+                codes.append(f"answer_no_range:{path}={no}" if -1000 < no < 1000 else f"answer_no_range:{path}")
+            elif no in numbers:
+                codes.append(f"answer_no_duplicate:{no}")
+            else:
+                numbers.add(no)
+            for key in CRITERIA:
+                _check_score(a, key, f"{path}.{key}", codes)
+            _check_text(a, "weak", f"{path}.weak", codes)
+            _check_text(a, "rewrite", f"{path}.rewrite", codes)
+            if "check" not in a:
+                codes.append(f"field_missing:{path}.check")
+            else:
+                _check_text_list(a["check"], f"{path}.check", codes)
+        codes += [f"answer_no_missing:{n}" for n in range(1, len(questions) + 1) if n not in numbers]
+
+    if "next" in raw:
+        _check_text_list(raw["next"], "next", codes)
+    return codes
+
+
+def checked_evaluation(raw, questions: list[dict]) -> dict:
+    """검증을 통과한 AI 평가만 저장 모양으로 바꾼다. 통과하지 못하면 EvaluationInvalid (아무것도 만들지 않음).
+    점수는 범위 밖이면 경계값으로 자르고 (위원 0~10 · 기준 0~5), 목록(check · next)은 원본 전체를 남긴다.
+    스키마 밖 칸은 옮기지 않는다. 원본(raw)은 바꾸지 않고 새 데이터를 만든다.
+    평균 · 합계 · 고친 답 여부는 자른 점수로 여기서 다시 계산한다 (AI 가 쓴 합계는 쓰지 않음)."""
+    codes = validate_evaluation(raw, questions)
+    if codes:
+        raise EvaluationInvalid(codes)
+    by_role = {m["role"]: m for m in raw["panel"]}
+    panel = [{"role": role, "against": by_role[role]["against"], "good": by_role[role]["good"],
+              "score": clamp(by_role[role]["score"], 0, PANEL_MAX)} for role in PANEL_ROLES]
+    by_number = {a["no"]: a for a in raw["answers"]}
+    answers = []
+    for i, q in enumerate(questions):
+        a = by_number[i + 1]
+        scores = {key: clamp(a[key], 0, CRITERION_MAX) for key in CRITERIA}
+        score = answer_score(scores)
+        answers.append({
+            "no": i + 1,
+            "question": q["question"],
+            "scores": scores,
+            "score": score,
+            "weak": a["weak"],
+            "rewrite": a["rewrite"],
+            "check": list(a["check"]),
+            "needs_rewrite": score < REWRITE_BELOW,
+        })
+    return {
+        "panel": panel,
+        "panel_average": panel_average(panel),
+        "conflict": raw["conflict"],
+        "agree": raw["agree"],
+        "answers": answers,
+        "next": list(raw["next"]),
+    }
+
+
+def validate_retry(raw) -> list[str]:
+    """AI 재도전 채점 원본 검사. 문제 코드 목록 (빈 목록 = 통과)."""
+    if not isinstance(raw, dict):
+        return ["not_object:retry"]
+    codes = []
+    for key in CRITERIA:
+        _check_score(raw, key, key, codes)
+    _check_text(raw, "weak", "weak", codes)
+    return codes
+
+
+def checked_retry(raw) -> dict:
+    """검증을 통과한 재도전 채점만 저장 모양으로 (summarize_retry 와 같은 모양). 통과하지 못하면 EvaluationInvalid.
+    점수는 범위 밖이면 0~5 로 자른다 (최초 평가와 같은 정책)."""
+    codes = validate_retry(raw)
+    if codes:
+        raise EvaluationInvalid(codes)
+    scores = {key: clamp(raw[key], 0, CRITERION_MAX) for key in CRITERIA}
+    return {"scores": scores, "score": answer_score(scores), "weak": raw["weak"]}
 
 
 # 위원 코치 피드백 (AI 호출 없음): 위원마다 PANEL_CRITERIA 에 가까운 기준 2개의 점수 변화로 고정 문장을 고른다.
@@ -1072,10 +1262,29 @@ def session_data(
     clue_round: int = 1,
     practice: list[dict] | None = None,
     past_hidden: list[dict] | None = None,
+    latest_unscored: dict | None = None,
+    retry_unreadable: dict | None = None,
+    evaluation_unreadable: list | None = None,
 ) -> dict:
     """'면접 없이 이어 하기' 용: 이 회차의 대화 · 평가 · 재도전(반영된 것 · 모든 기록) · 마지막 질문을 그대로 남긴다.
     practice: 연습 대본 [{question, script, round}] — 지난 회차 것까지 이어 붙인 목록 (merge_practice).
-    평가는 AI 응답과 같은 모양으로 남겨서, 읽을 때 summarize_evaluation() 으로 다시 검증 · 계산한다."""
+    평가는 AI 응답과 같은 모양으로 남겨서, 읽을 때 checked_evaluation() 으로 다시 검증 · 계산한다 (rebuild_session).
+    E-5 칸 (있을 때만 넣는다):
+      latest_unscored {질문: 답} — 채점받지 못한 최신 제출 답. 이미 채점받은 답(면접 때 답 · 재도전 기록)과 같으면 넣지 않는다
+      retry_unreadable {질문: [{attempt_id, raw}]} — 읽지 못한 재도전 기록 원본 (점수 계산에는 넣지 않음)
+      evaluation_unreadable [원본] — 읽지 못해 다시 평가받기 전의 최초 평가 원본
+    최고 점수 답(retries)과 횟수(retry_counts)는 기록에서 계산되는 값이지만 옛 앱 호환을 위해 같이 남긴다."""
+    history = retry_history or {}
+    unscored = {}
+    for no, answer in (latest_unscored or {}).items():
+        scored = {" ".join(a.split()) for a in [answer_text(messages, no - 1)] + [r["answer"] for r in history.get(no, [])]}
+        if isinstance(answer, str) and answer.strip() and " ".join(answer.split()) not in scored:
+            unscored[str(no)] = {"answer": answer}
+    extra = {
+        "latest_unscored": unscored,
+        "retry_unreadable": {str(no): items for no, items in (retry_unreadable or {}).items() if items},
+        "evaluation_unreadable": list(evaluation_unreadable or []),
+    }
     return {
         "messages": [
             {"role": m["role"], "content": m["content"], "q": m.get("q"), "kind": m.get("kind")}
@@ -1093,8 +1302,9 @@ def session_data(
         },
         "retries": {str(no): {"answer": r["answer"], **r["scores"], "weak": r["weak"]} for no, r in retries.items()},
         "retry_history": {
-            str(no): [{"answer": r["answer"], **r["scores"], "weak": r["weak"]} for r in attempts]
-            for no, attempts in (retry_history or {}).items()
+            str(no): [{"attempt_id": r.get("attempt_id") or attempt_id(no, i), "answer": r["answer"], **r["scores"],
+                       "weak": r["weak"]} for i, r in enumerate(attempts, 1)]
+            for no, attempts in history.items()
         },
         "retry_counts": {str(no): n for no, n in (retry_counts or {}).items()},
         # 역전의 실마리: 회차와 지금 보고 있는 실마리 (질문 번호 · 찾을 때 점수 · 찾을 때 재도전 횟수만)
@@ -1113,6 +1323,7 @@ def session_data(
         ][:MAX_PRACTICE],
         # 사용자가 지운 지난 회차 답 [{question, round}] — 지난 회차 것까지 이어 붙인 목록 (리포트 파일 자체는 바꾸지 않는다)
         "past_hidden": [{"question": h["question"], "round": h["round"]} for h in (past_hidden or [])][:MAX_PAST_HIDDEN],
+        **{key: value for key, value in extra.items() if value},
     }
 
 
@@ -1172,11 +1383,26 @@ def _trim(value, depth: int = 0):
     return None
 
 
+def _trim_attempt_lists(value) -> dict:
+    """재도전 기록 칸 {질문: [기록, ...]}: 목록을 40개로 자르지 않는다 (E-5). 질문당 MAX_ATTEMPTS_PER_QUESTION 을 넘으면
+    일부만 읽지 않고 파일 전체를 거부한다. 기록 하나 안의 글 · 칸은 _trim 과 같은 규칙으로 정리한다."""
+    if not isinstance(value, dict):
+        return {}
+    lists = {}
+    for key, items in list(value.items())[:MAX_SESSION_MESSAGES]:
+        if isinstance(items, list) and len(items) > MAX_ATTEMPTS_PER_QUESTION:
+            raise ValueError(f"재도전 기록이 너무 많은 리포트라 불러오지 않았어요 (질문당 {MAX_ATTEMPTS_PER_QUESTION}개 초과).")
+        lists[str(key)[:40]] = [_trim(item, 3) for item in items] if isinstance(items, list) else _trim(items, 2)
+    return lists
+
+
 def _parse_session(raw) -> dict | None:
-    """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가)."""
+    """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가).
+    재도전 기록이 질문당 한도를 넘으면 ValueError (자르지 않고 거부)."""
     if not isinstance(raw, dict):
         return None
-    raw = _trim(raw)
+    attempts = {key: _trim_attempt_lists(raw.get(key)) for key in ATTEMPT_LISTS if key in raw}
+    raw = {**_trim({k: v for k, v in raw.items() if k not in ATTEMPT_LISTS}), **attempts}
     messages = []
     for m in raw.get("messages") or []:
         if not isinstance(m, dict) or m.get("role") not in ("assistant", "user") or not isinstance(m.get("content"), str):
@@ -1214,41 +1440,108 @@ def rebuild_clues(raw, evaluation: dict, retries: dict) -> dict:
         clues.append({
             "no": no, "question": a["question"], "score": clamp(it.get("score"), 0, ANSWER_MAX), "weak": a["weak"],
             "criterion": key, "name": CRITERIA[key], "criterion_score": a["scores"][key],
-            "retry_count": clamp(it.get("retry_count"), 0, MAX_RETRIES),
+            "retry_count": clamp(it.get("retry_count"), 0, MAX_RETRY_COUNT),
         })
     return {"clue_round": clue_round, "clue_set": clues}
 
 
+def attempt_id(no: int, n: int) -> str:
+    """재도전 기록 ID: 질문 번호 + 그 질문의 n번째 기록 (예: q5-a3). 같은 파일을 여러 번 불러와도 같은 ID가 나온다.
+    회차를 넘어 고유한 ID 는 여러 회차를 담는 v2 에서 round_id 와 묶는다."""
+    return f"q{no}-a{n}"
+
+
+def next_attempt_id(no: int, *groups) -> str:
+    """새 재도전 기록의 ID: 이 질문에서 쓴 ID(읽은 기록 · 읽지 못한 기록 모두)의 가장 큰 번호 + 1."""
+    used = [int(m.group(2)) for items in groups for item in items or []
+            if isinstance(item, dict) and (m := ATTEMPT_ID.match(str(item.get("attempt_id", ""))))]
+    return attempt_id(no, max(used, default=0) + 1)
+
+
+def reflected_retries(evaluation: dict, history: dict) -> dict:
+    """질문마다 반영할 재도전 (최고 점수 · 동점이면 먼저 받은 것). 최고 점수 답은 저장하지 않고 기록에서 계산한다."""
+    original = {a["no"]: a["score"] for a in evaluation["answers"]}
+    best = {no: reflected_retry(original[no], attempts) for no, attempts in history.items() if no in original}
+    return {no: b for no, b in best.items() if b}
+
+
 def rebuild_session(session: dict, questions: list[dict]) -> dict:
-    """리포트의 session 으로 면접 끝난 상태를 다시 만든다. 점수 · 합계는 여기서 다시 검증 · 계산한다."""
-    evaluation = summarize_evaluation(session["evaluation"], questions)
-    def attempt(r) -> dict | None:
-        return {"answer": r["answer"], **summarize_retry(r)} if isinstance(r, dict) and isinstance(r.get("answer"), str) else None
+    """리포트의 session 으로 면접 끝난 상태를 다시 만든다. 점수 · 합계는 여기서 다시 검증 · 계산한다 (E-5).
+    - 최초 평가: AI 응답과 같은 검증(checked_evaluation · 범위 밖 정수는 보정). 통과하지 못하면 0점으로 채우지 않고
+      evaluation=None (대화 · 답만 부분 복원, 다시 평가받기) · 원본은 evaluation_unreadable 에 남겨 다시 저장해도 잃지 않는다.
+    - 재도전 기록: 기록마다 checked_retry. 읽지 못한 기록은 버리지 않고 원본을 retry_unreadable 에 남기고 점수에서 뺀다.
+      개수를 자르지 않는다 (질문당 한도 초과는 _parse_session 에서 거부). attempt_id 가 없으면 순서로 붙인다.
+    - 최고 점수 답(retries) · 횟수(retry_counts)는 파일 값을 쓰지 않고 기록에서 다시 계산한다.
+    problems: 복원하며 찾은 문제 (오류 기록 · 안내용) — evaluation: 평가 문제 코드, retry_unreadable: 읽지 못한 재도전 수."""
+    evaluation_unreadable = [e for e in session.get("evaluation_unreadable") or [] if e is not None]         if isinstance(session.get("evaluation_unreadable"), list) else []
+    try:
+        evaluation, evaluation_codes = checked_evaluation(session["evaluation"], questions), []
+    except EvaluationInvalid as e:
+        evaluation, evaluation_codes = None, e.codes
+        evaluation_unreadable.append(session["evaluation"])
 
     def question_no(key) -> int | None:
         return int(key) if str(key).isdigit() and 1 <= int(key) <= TOTAL_QUESTIONS else None
 
-    # 모든 재도전 기록. 기록이 없는 옛 리포트는 남아 있던 재도전 하나를 기록으로 쓴다.
+    # 읽지 못한 기록: 지난번에 읽지 못해 남겨 둔 것은 그대로 이어 간다 (질문 번호가 이상한 칸도 원본 키 그대로)
+    unreadable: dict = {}
+    for key, items in (session.get("retry_unreadable") or {}).items():
+        unreadable.setdefault(question_no(key) or key, []).extend(items if isinstance(items, list) else [items])
+    retry_codes: list[str] = []
+
+    def read_attempts(no, items) -> list[dict]:
+        """기록마다 ID 를 정하고 검증한다. 파일에 있는 이 질문의 ID 는 그대로 쓰고, 없거나 겹치면 순서(n번째)로,
+        순서 ID 가 이미 쓰였으면 쓴 번호 다음 번호로 붙인다 (같은 파일이면 늘 같은 결과)."""
+        def own(aid) -> bool:
+            m = ATTEMPT_ID.match(aid) if isinstance(aid, str) else None
+            return bool(m) and int(m.group(1)) == no
+
+        given = [item.get("attempt_id") if isinstance(item, dict) else None for item in items]
+        reserved = {u.get("attempt_id") for u in unreadable.get(no, []) if isinstance(u, dict)}
+        claimed = {a for a in given if own(a)} | {a for a in reserved if own(a)}
+        top = max([int(ATTEMPT_ID.match(a).group(2)) for a in claimed] + [len(items)], default=0)
+        attempts, seen = [], set(reserved)
+        for n, (item, aid) in enumerate(zip(items, given), 1):
+            if not own(aid) or aid in seen:
+                aid = attempt_id(no, n)
+                if aid in claimed or aid in seen:
+                    top += 1
+                    aid = attempt_id(no, top)
+            seen.add(aid)
+            try:
+                if not (isinstance(item, dict) and isinstance(item.get("answer"), str)):
+                    raise EvaluationInvalid(["not_object:retry" if not isinstance(item, dict) else "field_missing:answer"])
+                attempts.append({"attempt_id": aid, "answer": item["answer"], **checked_retry(item)})
+            except EvaluationInvalid as e:
+                unreadable.setdefault(no, []).append({"attempt_id": aid, "raw": item})
+                retry_codes.extend(e.codes)
+        return attempts
+
     history = {}
     for key, items in (session.get("retry_history") or {}).items():
-        attempts = [a for a in (attempt(r) for r in (items if isinstance(items, list) else [])) if a][:MAX_RETRIES]
-        if question_no(key) and attempts:
-            history[question_no(key)] = attempts
+        no = question_no(key)
+        if no is None or not isinstance(items, list):
+            unreadable.setdefault(key, []).append({"attempt_id": None, "raw": items})  # 모르는 질문 번호: 원본만 보존
+            retry_codes.append("retry_key_invalid")
+            continue
+        attempts = read_attempts(no, items)
+        if attempts:
+            history[no] = attempts
+    # 기록 기능 전 옛 리포트: 남아 있던 재도전 하나를 기록으로 쓴다
     for key, r in (session.get("retries") or {}).items():
-        if question_no(key) and question_no(key) not in history and attempt(r):
-            history[question_no(key)] = [attempt(r)]
-    # 반영 점수는 기록에서 다시 고른다 (최고 점수 반영 · 옛 리포트의 낮은 재도전도 여기서 걸러진다)
-    original = {a["no"]: a["score"] for a in evaluation["answers"]}
-    retries = {}
-    for no, attempts in history.items():
-        best = reflected_retry(original[no], attempts)
-        if best:
-            retries[no] = best
-    retry_counts = {
-        int(k): clamp(v, 0, MAX_RETRIES)
-        for k, v in (session.get("retry_counts") or {}).items()
-        if str(k).isdigit() and 1 <= int(k) <= TOTAL_QUESTIONS
-    }
+        no = question_no(key)
+        if no and no not in history and no not in unreadable:
+            attempts = read_attempts(no, [r])
+            if attempts:
+                history[no] = attempts
+
+    retries = reflected_retries(evaluation, history) if evaluation else {}
+    retry_counts = {no: len(attempts) for no, attempts in history.items()}  # 횟수는 기록 개수 (파일 값은 쓰지 않음)
+    latest_unscored = {}
+    for key, item in (session.get("latest_unscored") or {}).items():
+        no = question_no(key)
+        if no and isinstance(item, dict) and isinstance(item.get("answer"), str) and item["answer"].strip():
+            latest_unscored[no] = item["answer"]
 
     def pairs(items) -> list[tuple[str, str]]:
         return [
@@ -1268,7 +1561,12 @@ def rebuild_session(session: dict, questions: list[dict]) -> dict:
         "retries": retries,
         "retry_history": history,
         "retry_counts": retry_counts,
-        **rebuild_clues(session.get("clues"), evaluation, retries),
+        "latest_unscored": latest_unscored,
+        "retry_unreadable": unreadable,
+        "evaluation_unreadable": evaluation_unreadable,
+        "problems": {"evaluation": evaluation_codes, "retry_codes": retry_codes,
+                     "retry_unreadable": sum(len(v) for v in unreadable.values())},
+        **(rebuild_clues(session.get("clues"), evaluation, retries) if evaluation else {"clue_round": 1, "clue_set": None}),
         "last_suggest": pairs(session.get("last_suggest")) or None,
         "last_question": last_question if last_question and last_question["questions"] else None,
         "understanding": clamp(understanding, 0, 100) if isinstance(understanding, int) else None,
@@ -1291,6 +1589,7 @@ def report_data(
         "criteria_version": criteria_version(),
         "precheck": precheck,
         "version": REPORT_DATA_VERSION,
+        "revision": REPORT_DATA_REVISION,
         "round": round_no,
         "date": day.isoformat(),
         "profile": {
@@ -1318,6 +1617,8 @@ def _text(value, field: str) -> str:
 
 def parse_report(text: str) -> dict:
     """면접리포트.md 에서 숨겨 둔 데이터를 읽는다. 문제가 있으면 한국어 한 줄로 ValueError."""
+    if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError(f"리포트 파일이 너무 커서 불러오지 않았어요 ({MAX_REPORT_BYTES // (1024 * 1024)}MB 초과).")
     found = REPORT_DATA_RE.search(text)
     if not found:
         raise ValueError("이 파일에는 이어 하기 데이터가 없어요. 이 앱에서 받은 면접리포트.md 를 올려 주세요.")
@@ -1452,7 +1753,7 @@ def report_checklist(
     tried = f" · 재도전 총 {attempts}번" if attempts else ""
     if not evaluation or clues is None:
         retry = {"done": False, "detail": "평가 뒤에 열려요", "sub": []}
-    elif not clues["total"]:  # 모두 만점이거나 재도전 기회를 다 씀
+    elif not clues["total"]:  # 모두 만점
         retry = {"done": True, "detail": "남은 실마리 없음" + tried, "sub": []}
     else:
         retry = {
@@ -1579,6 +1880,9 @@ def build_report(
     verdict_open: bool = False,
     practice: list[dict] | None = None,
     past_hidden: list[dict] | None = None,
+    latest_unscored: dict | None = None,
+    retry_unreadable: dict | None = None,
+    evaluation_unreadable: list | None = None,
 ) -> str:
     """면접리포트.md. 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
@@ -1741,13 +2045,15 @@ def build_report(
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
     session = session_data(messages, evaluation, retries, retry_counts, last_suggest, last_question, understanding, history,
-                           clue_set, clue_round, practice, past_hidden)
+                           clue_set, clue_round, practice, past_hidden, latest_unscored, retry_unreadable,
+                           evaluation_unreadable)
     lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day, session))]
     return "\n".join(lines) + "\n"
 
 
 def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
-    """AI 평가를 범위 안으로 자르고, 평균 · 합계는 여기서 다시 계산한다."""
+    """옛 보정 방식: 평가를 범위 안으로 자르고 빠진 위원은 0점, 번호가 없으면 순서로 찾는다. 앱은 쓰지 않고
+    v1 기준 샘플 생성기 · 비교 테스트만 쓴다. AI 응답 · 리포트 복원은 checked_evaluation (E-3 · E-5)."""
     by_role = {m.get("role"): m for m in raw.get("panel", [])}
     panel = []
     for role in PANEL_ROLES:
