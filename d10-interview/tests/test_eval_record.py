@@ -42,6 +42,17 @@ class FormatRecordTest(unittest.TestCase):
         self.assertNotIn("[보는 점]", coach.format_record(blank, MESSAGES))
 
 
+class EvaluatorPromptTest(unittest.TestCase):
+
+    def test_point_is_reference_not_keyword(self):
+        """평가 지시문: [보는 점]은 참고 기준, 키워드 포함 여부만으로 판단하지 않는다. 위원 4명 · 점수 체계는 그대로."""
+        text = coach.build_evaluator({"job": "디자인", "company": "", "experience": ""})
+        self.assertIn("[보는 점]은 질문의 평가 의도를 이해하기 위한 참고 기준", text)
+        self.assertIn("특정 키워드의 포함 여부만으로 판단하지 말고", text)
+        for keep in ("실무 전문가 · 논리 분석가 · 커뮤니케이션 전문가 · 채용 담당자", "0~10점", "각각 0~5점"):
+            self.assertIn(keep, text)
+
+
 class EvaluationInputTest(AppFlowCase):
 
     def test_evaluation_input_has_points(self):
