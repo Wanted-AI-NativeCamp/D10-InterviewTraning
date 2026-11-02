@@ -289,6 +289,27 @@ def scroll_to_anchor(anchor: str):
     )
 
 
+def scroll_to_key(key: str):
+    """키를 단 칸(st.container(key=...))이 화면 아래쪽에 보이게 바로 내린다 (깜빡임을 줄이려고 기다리지 않고 그려지는 대로).
+    스크립트는 고정 문장이고 key(코드에 적힌 글자)와 실행 번호만 넣는다."""
+    state["scroll_seq"] = state.get("scroll_seq", 0) + 1
+    selector = f".st-key-{key}"
+    st.html(
+        f"""<script>/* {int(state["scroll_seq"])} */
+(() => {{
+  let tries = 0;
+  const go = () => {{
+    const el = document.querySelector({selector!r});
+    if (el) {{ el.scrollIntoView({{ block: "end", behavior: "instant" }}); return; }}
+    if (++tries < 40) requestAnimationFrame(go);
+  }};
+  go();
+}})();
+</script>""",
+        unsafe_allow_javascript=True,
+    )
+
+
 def scroll_to_top():
     """페이지 맨 위로 (Streamlit 에 스크롤 기능이 없어서 짧은 스크립트로).
     스크립트는 고정 문장이고 숫자(실행 번호)만 넣는다 — 사용자 글 · AI 출력 · 키는 넣지 않는다.
@@ -1410,6 +1431,7 @@ def send_answer(text: str, show_bubble: bool):
         else:
             state.messages.append({"role": "assistant", "content": "면접을 마치겠습니다."})
             state.stage = "done"
+            state.finish_scroll = True  # 입력창이 사라지면 화면이 맨 위로 가서, 다음 화면에서 완료 안내로 내린다
     st.rerun()
 
 
@@ -1912,15 +1934,33 @@ def page_interview():
     show_messages()
     live = st.container()  # 답을 보내는 동안의 내 답 · 로딩 · 에러가 대화 바로 아래에 나온다
     if state.stage == "done":
-        st.success("질문 5개를 모두 마쳤어요. 수고하셨습니다.")
-        if state.evaluation:
-            st.info("평가가 끝났어요. 이 회차의 평가 기록에서 확인해 주세요.")
-            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_round_record)
-        elif st.button(":material/gavel: 평가 받기", type="primary", key="eval_request"):
-            if request_evaluation():
-                st.rerun()
+        show_interview_done()
         return
     interview_turn()
+
+
+def start_evaluation():
+    state.eval_running = True
+
+
+def show_interview_done():
+    """면접 완료 안내 → [평가 받기] → (평가 중) → [평가 확인하기].
+    면접 중에는 입력창(st.chat_input) 때문에 Streamlit 이 화면을 맨 아래에 붙여 두는데, 마지막 답으로 입력창이 사라지면
+    스크롤 칸이 바뀌면서 맨 위로 간다. 그래서 마지막 답 직후 한 번만 이 안내를 화면에 보이게 내린다 (finish_scroll).
+    평가 중에는 [평가 받기] 를 그리지 않아 두 번 누를 수 없다. 평가 중 다른 버튼을 눌러 실행이 끊겨도 다시 부르지 않는다."""
+    answered = sum(1 for m in state.messages if m.get("role") == "user")
+    with st.container(key="interview_done"):
+        st.markdown(f"**:material/task_alt: 질문 {coach.TOTAL_QUESTIONS}개를 모두 마쳤어요. 수고하셨습니다.**")
+        if state.evaluation:
+            st.caption("평가가 끝났어요. 이 회차의 면접 기록에서 위원 4명의 평가를 확인해 주세요.")
+            st.button(":material/bar_chart: 평가 확인하기", type="primary", key="eval_check", on_click=go_round_record)
+        else:
+            if state.pop("eval_running", False) and request_evaluation():  # 깃발을 먼저 내려 끊겨도 다시 부르지 않는다
+                st.rerun()
+            st.caption(f"답변 {answered}개를 기록했어요. [평가 받기] 를 누르면 위원 4명이 답변을 평가해요.")
+            st.button(":material/gavel: 평가 받기", type="primary", key="eval_request", on_click=start_evaluation)
+    if state.pop("finish_scroll", False):
+        scroll_to_key("interview_done")
 
 
 # ── GNB 2 · 면접 코칭 ────────────────────────────────────────────
