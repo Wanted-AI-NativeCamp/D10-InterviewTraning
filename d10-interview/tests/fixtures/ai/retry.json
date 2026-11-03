@@ -1,0 +1,12 @@
+{
+ "_note": "재도전 채점 응답 (RETRY_SCHEMA · ask_json name 'retry'). 점수는 evaluation.json 의 mixed 와 비교하도록 골랐다 (mixed 2번 10점 · 5번 8점). edge_cases 는 범위 밖 점수 (앱이 0~5 로 자른다).",
+ "cases": {
+  "improved": {"specific": 4, "relevance": 4, "structure": 4, "evidence": 4, "weak": "결과 수치의 출처를 한 번 더 밝혀 주세요."},
+  "same": {"specific": 2, "relevance": 3, "structure": 1, "evidence": 4, "weak": "순서는 그대로 흐려요."},
+  "lower": {"specific": 1, "relevance": 1, "structure": 1, "evidence": 1, "weak": "질문과 다른 이야기를 했어요."},
+  "perfect": {"specific": 5, "relevance": 5, "structure": 5, "evidence": 5, "weak": ""}
+ },
+ "edge_cases": {
+  "out_of_range": {"specific": 7, "relevance": -1, "structure": 5, "evidence": 5, "weak": "범위 밖 점수"}
+ }
+}

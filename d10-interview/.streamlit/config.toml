@@ -1,16 +1,15 @@
 # 몽타주(Montage) 디자인 시스템 — 원티드랩, MIT 라이선스
 # 출처: https://github.com/wanteddev/montage-web (packages/theme/src/theme/atomic · semantic)
 # 바탕 · 글자 · 테두리 · 상태 색 · 글꼴 · 모서리는 몽타주 값 그대로, 이름 옆 괄호는 팔레트 번호.
-# 강조색만 몽타주 파랑 대신 '채도 높은 진 네이비' (서비스 요청).
-# 글꼴: Wanted Sans (SIL OFL 1.1) — https://github.com/wanteddev/wanted-sans (가변 글꼴, 굵기 400~1000)
-# 당근 느낌을 내려고 Pretendard 에서 바꿈. 당근 전용 서체(Karrot Sans)는 공개 라이선스가 없어 쓰지 않는다.
+# 2026-11 MVP1 디자인 시스템 (prd/design.md): 브랜드 #0252DE · 글자 #0B1020 · 보조 글자 #444D63 · Pretendard.
+# 글꼴: Pretendard (SIL OFL 1.1) — https://github.com/orioncactus/pretendard (가변 글꼴, 동적 서브셋)
 
 [theme]
-font = "Wanted Sans Variable:https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css"
-headingFont = "Wanted Sans Variable:https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css"
+font = "Pretendard Variable:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"
+headingFont = "Pretendard Variable:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"
 # 글자 체계: 당근(about.daangn.com) 크기 · 굵기.
 # 줄간격 · 자간 · 좁은 화면 H1 크기는 app.py hover_css 에 있다.
-headingFontSizes = ["42px", "28px", "20px", "18px", "16px", "14px"]
+headingFontSizes = ["30px", "24px", "20px", "18px", "16px", "14px"]  # 서비스 안 H1 24~32px
 headingFontWeights = [700, 700, 700, 600, 600, 600]  # H1 ~ H3 700 (당근은 제목을 모두 Bold), H4 이하 600
 baseFontSize = 16
 baseRadius = "8px"      # radius md
@@ -18,15 +17,15 @@ buttonRadius = "10px"   # 버튼 medium
 showWidgetBorder = true
 
 [theme.light]
-primaryColor = "#10256B"              # 진 네이비 (H226 S74% L24%) · 흰 글자 대비 14.0
+primaryColor = "#0252DE"              # 브랜드 블루 · 흰 글자 대비 6.0
 backgroundColor = "#FFFFFF"           # common 100
 secondaryBackgroundColor = "#F7F7F8"  # coolNeutral 99
-textColor = "#171719"                 # coolNeutral 10
-linkColor = "#10256B"
+textColor = "#0B1020"                 # 기본 글자
+linkColor = "#0252DE"
 borderColor = "#E1E2E4"               # coolNeutral 96
-blueColor = "#10256B"                 # 안내 상자도 진 네이비 계열로
-blueBackgroundColor = "#E8EBF5"
-blueTextColor = "#10256B"
+blueColor = "#0252DE"                 # 안내 상자도 브랜드 블루 계열로
+blueBackgroundColor = "#EAF1FE"
+blueTextColor = "#0242B2"
 greenColor = "#00BF40"                # green 50
 greenBackgroundColor = "#D9FFE6"      # green 95
 greenTextColor = "#006E25"            # green 30
@@ -38,18 +37,18 @@ redBackgroundColor = "#FEECEC"        # red 95
 redTextColor = "#B00C0C"              # red 30
 grayColor = "#70737C"                 # coolNeutral 50
 grayBackgroundColor = "#F4F4F5"       # coolNeutral 98
-grayTextColor = "#46474C"             # coolNeutral 30
+grayTextColor = "#444D63"             # 보조 글자
 
 [theme.dark]
-primaryColor = "#4263D6"              # 진 네이비는 어두운 바탕에서 안 보여서 같은 계열을 밝힘 · 흰 글자 5.3 · 바탕 대비 3.2
+primaryColor = "#3D7BFF"              # 브랜드 블루를 어두운 바탕용으로 밝힘
 backgroundColor = "#1B1C1E"           # coolNeutral 15
 secondaryBackgroundColor = "#212225"  # coolNeutral 17
 textColor = "#F7F7F8"                 # coolNeutral 99
-linkColor = "#9DB0F0"
+linkColor = "#8DB4FF"
 borderColor = "#37383C"               # coolNeutral 25
-blueColor = "#7F96E6"
-blueBackgroundColor = "#1E2440"
-blueTextColor = "#B9C6F2"
+blueColor = "#6E9DFF"
+blueBackgroundColor = "#14244A"
+blueTextColor = "#A9C6FF"
 greenColor = "#1ED45A"                # green 60
 greenBackgroundColor = "#1C3928"
 greenTextColor = "#49E57D"            # green 70

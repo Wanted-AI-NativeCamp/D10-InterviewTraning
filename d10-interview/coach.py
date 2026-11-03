@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import re
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -53,7 +54,7 @@ MAX_ANSWER_CHARS = 1500
 MAX_EXPERIENCE_CHARS = 1000  # 내 경험은 모든 호출에 들어간다
 MAX_LAST_QUESTION_CHARS = 300
 MAX_MEMO_CHARS = 200
-MAX_RETRIES = 3  # 질문당
+MAX_RETRY_COUNT = 999_999  # 재도전 횟수 제한은 없다 (E-4B). 리포트에서 읽은 횟수의 이상한 값만 막는 안전 상한
 MAX_CHECKS = 2
 MAX_NEXT = 3
 LAST_ANGLES = ["회사", "직무", "성장"]  # 마지막 질문 3개의 관점 (이 순서)
@@ -62,6 +63,13 @@ PROMPT_BLANK = "___"
 # 리포트 끝에 숨겨 두는 데이터 (마크다운 주석이라 문서에는 안 보임). 다음 면접에서 다시 읽는다.
 REPORT_DATA_TAG = "interview-data"
 REPORT_DATA_VERSION = 1
+# 같은 version 1 안의 개정 (E-5): 재도전 기록의 attempt_id · 채점받지 못한 최신 답(latest_unscored) ·
+# 읽지 못한 재도전(retry_unreadable) · 읽지 못한 최초 평가(evaluation_unreadable) 칸을 더했다. 옛 앱은 모르는 칸을 무시한다.
+REPORT_DATA_REVISION = 2
+MAX_REPORT_BYTES = 5 * 1024 * 1024  # 리포트 파일 안전 한도. 넘으면 자르지 않고 불러오기를 거부한다
+MAX_ATTEMPTS_PER_QUESTION = 500     # 질문당 재도전 기록 안전 한도. 넘으면 자르지 않고 불러오기를 거부한다
+ATTEMPT_LISTS = ("retry_history", "retry_unreadable")  # _trim 의 목록 40개 한도를 쓰지 않는 칸
+ATTEMPT_ID = re.compile(r"^q([1-9])-a([1-9][0-9]{0,5})$")
 REPORT_DATA_RE = re.compile(r"<!--\s*" + REPORT_DATA_TAG + r"\s+(\{.*\})\s*-->", re.DOTALL)
 MAX_FIELD_CHARS = 2000  # 리포트에서 읽는 글 한 칸의 최대 길이
 MAX_ROUND = 999
@@ -107,7 +115,8 @@ def fits_company(keywords: str, company_text: str) -> bool:
 def question_row(row) -> dict:
     """질문 은행 한 줄 → 면접에서 쓰는 질문. example: 가상 지원자의 만점 예시 답 (사용자 정보와 무관, 없으면 빈칸)."""
     return {"type": row["유형"], "question": row["질문"], "point": row["보는 점"], "field": row["분야"],
-            "example": str(row["만점 예시"]).strip()}
+            "example": str(row["만점 예시"]).strip(),
+            "question_id": str(row["질문 ID"]).strip() if "질문 ID" in row and str(row["질문 ID"]).strip() else None}
 
 
 def past_result(report: dict, index: int) -> dict:
@@ -121,7 +130,10 @@ def past_result(report: dict, index: int) -> dict:
     attempts = []
     for r in items if isinstance(items, list) else []:
         if isinstance(r, dict) and isinstance(r.get("answer"), str) and r["answer"].strip():
-            attempts.append({"answer": r["answer"].strip(), **summarize_retry(r)})
+            try:
+                attempts.append({"answer": r["answer"].strip(), **checked_retry(r)})
+            except EvaluationInvalid:
+                continue  # 읽지 못한 재도전은 점수 비교에 쓰지 않는다 (E-5)
     best = reflected_retry(score, attempts) if score is not None and attempts else None
     return {"answer": best["answer"], "score": best["score"]} if best else {"answer": first, "score": score}
 
@@ -215,17 +227,17 @@ def overview_advice(best: dict) -> list[tuple[str, str]]:
     """종합 점검 안내 (고정 문장): 둘 다 합격선을 넘도록 비어 있거나 모자란 쪽을 권한다."""
     out = []
     if best["common"] is None:
-        out.append(("info", "공통 면접 기록이 없어요. 분야를 '공통' 으로 한 번 진행해 어느 회사에서나 나오는 일반 역량도 점검해 보세요."))
+        out.append(("info", "공통 면접 기록이 없어요. '공통 면접' 으로 한 번 진행해 어느 회사에서나 나오는 일반 역량도 점검해 보세요."))
     elif best["common"] < PASS_TOTAL:
         out.append(("warning", f"공통 면접 최고 {best['common']}점 · 합격선까지 {PASS_TOTAL - best['common']}점 남았어요. "
-                               "자기소개 · 협업 같은 일반 질문을 재도전과 암기로 다듬어 보세요."))
+                               "자기소개 · 협업 같은 일반 질문을 재도전으로 다듬어 보세요."))
     if best["field"] is None:
         out.append(("info", "분야 면접 기록이 없어요. 다음 회차는 지원할 회사의 분야를 골라 그 분야만의 특수 질문에 대비해 보세요."))
     elif best["field"] < PASS_TOTAL:
         out.append(("warning", f"분야 면접 최고 {best['field']}점 · 합격선까지 {PASS_TOTAL - best['field']}점 남았어요. "
                                "분야 질문은 회사 · 서비스 맥락을 넣어 답하면 점수가 잘 올라요."))
     if not out:
-        out.append(("success", f"공통 · 분야 면접 모두 합격선({PASS_TOTAL}점)을 넘었어요. 암기와 말하기 연습으로 실전 감각을 유지하세요."))
+        out.append(("success", f"공통 · 분야 면접 모두 합격선({PASS_TOTAL}점)을 넘었어요. 재도전으로 답을 계속 다듬으며 실전 감각을 유지하세요."))
     return out
 
 
@@ -239,7 +251,8 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD, compa
     """자기소개 1 + 공통 1 + 직무 1 + 경험 1 + 상황 1 = 5개를 이 순서로 무작위로 고른다.
     자리마다 고른 분야의 질문이 있으면 그중에서, 없으면 분야 공통 질문에서 고른다.
     company_text(회사 이름 · 설명)에 맞지 않는 질문(회사 키워드가 하나도 없는 질문)은 빼고 고른다.
-    avoid(지난 회차에 나온 질문 글)를 주면 안 나온 질문부터: 고른 분야 → 분야 공통 → (모두 나왔으면) 나온 질문 다시."""
+    avoid(지난 회차에 나온 질문 글)를 주면 안 나온 질문부터. 분야 자리는 안 나온 분야 질문 → 나온 분야 질문 다시
+    (공통 질문으로 바꾸지 않는다), 공통 자리는 안 나온 질문 → 나온 질문 다시. 한 회차 안에서 같은 질문은 두 번 고르지 않는다."""
     avoid = avoid or set()
     df = df[[fits_company(k, company_text) for k in df["회사 키워드"]]] if "회사 키워드" in df.columns else df
     common = df[df["직군"] == "공통"]
@@ -255,13 +268,16 @@ def pick_questions(df: pd.DataFrame, job: str, field: str = DEFAULT_FIELD, compa
     ]
     picked = []
     for pool in pools:
+        pool = pool[~pool["질문"].isin([q["question"] for q in picked])]  # 같은 회차 안에서 같은 질문 두 번 금지
         in_field = pool[pool["분야"] == field] if field != DEFAULT_FIELD else pool.iloc[0:0]
         base = in_field if not in_field.empty else pool[pool["분야"] == DEFAULT_FIELD]
         if base.empty:
             raise ValueError(f"'{job}' 직군 질문이 질문 은행에 부족해요.")
-        tiers = [base, pool[pool["분야"] == DEFAULT_FIELD]]
+        # 분야 자리: 안 나온 분야 질문 → 나온 분야 질문 다시 (공통 질문으로 바꾸지 않아 공통 2 + 분야 3 유지)
+        # 공통 자리 · 이 분야에 이 유형 질문이 없는 자리: 안 나온 질문 → 나온 질문 다시
+        tiers = [base] if not in_field.empty else [base, pool[pool["분야"] == DEFAULT_FIELD]]
         fresh = [t[~t["질문"].isin(avoid)] for t in tiers]
-        choice = next((t for t in fresh if not t.empty), base)  # 안 나온 질문이 없으면 나온 질문 다시
+        choice = next((t for t in fresh if not t.empty), base)
         picked.append(question_row(choice.sample(1).iloc[0]))
     assert len(picked) == TOTAL_QUESTIONS
     return picked
@@ -295,7 +311,12 @@ def plan_questions(df: pd.DataFrame, job: str, field: str, company_text: str, mo
         # 자기소개(첫 자리)는 매번 같은 질문이라 빼고, 나머지 자리에서 지난 질문 MIX_KEEP 개를 남긴다
         slots = [i for i, text in enumerate(previous[:TOTAL_QUESTIONS]) if i > 0 and not bank[bank["질문"] == text].empty]
         for i in rng.sample(slots, min(MIX_KEEP, len(slots))):
-            questions[i] = question_row(bank[bank["질문"] == previous[i]].iloc[0])
+            if previous[i] in {q["question"] for j, q in enumerate(questions) if j != i}:
+                continue  # 다른 자리에 이미 있는 질문은 남기지 않는다 (같은 회차 안 중복 금지)
+            kept_row = question_row(bank[bank["질문"] == previous[i]].iloc[0])
+            if kept_row["field"] != questions[i]["field"]:
+                continue  # 분야를 바꿨으면 지난 질문을 남기지 않는다 (공통 2 + 분야 3 유지)
+            questions[i] = kept_row
         kept = {previous[i] for i in slots} & {q["question"] for q in questions}
         repeats = sum(1 for q in questions[1:] if q["question"] in asked and q["question"] not in kept)
     else:
@@ -311,15 +332,19 @@ def field_of(profile: dict) -> str:
     return profile.get("field") if profile.get("field") in FIELDS else DEFAULT_FIELD
 
 
-def build_context(profile: dict) -> str:
+NO_COMPANY = "회사 미지정"  # 회사를 정하지 않은 면접 (화면에서는 '기타' 그룹)
+
+
+def build_context(profile: dict, with_experience: bool = True) -> str:
+    """상황 블록. 평가 · 재도전 채점은 with_experience=False: 사전 입력 경험은 평가 근거로 쓰지 않는다 (PRD 0.3)."""
     field = field_of(profile)
     return CONTEXT.format(
-        company=profile["company"],
-        company_desc=profile["company_desc"],
+        company=profile.get("company") or NO_COMPANY,
+        company_desc=profile.get("company_desc") or "-",
         field=field,
         field_desc=FIELDS[field],
         job=profile["job"],
-        experience=profile["experience"],
+        experience=(profile.get("experience") or "(입력 없음)") if with_experience else "(평가에는 쓰지 않음)",
     )
 
 
@@ -348,7 +373,7 @@ def format_panel_criteria() -> str:
 
 
 def build_evaluator(profile: dict) -> str:
-    return EVALUATOR.format(panel_criteria=format_panel_criteria(), context=build_context(profile))
+    return EVALUATOR.format(panel_criteria=format_panel_criteria(), context=build_context(profile, with_experience=False))
 
 
 MAX_TIPS_PER_CRITERION = 2
@@ -376,11 +401,11 @@ def total_scores(evaluation: dict, retries: dict) -> dict:
 
 
 def reflected_retry(original_score: int, history: list[dict]) -> dict | None:
-    """최고 점수 반영: 처음 점수보다 높은 재도전 중 가장 높은 것 (같은 점수면 나중 것). 없으면 None (처음 점수 반영).
-    state.retries[no] 에는 이 값만 넣는다 → 종합 점수 · 판정 · 실마리 · 리포트가 모두 최고 점수를 쓴다."""
+    """최고 점수 반영: 처음 점수보다 높은 재도전 중 가장 높은 것 (같은 점수면 먼저 받은 것 — 기존 최고 답 유지).
+    없으면 None (처음 점수 반영). state.retries[no] 에는 이 값만 넣는다 → 종합 점수 · 판정 · 실마리 · 리포트가 모두 최고 점수를 쓴다."""
     best = None
     for attempt in history:
-        if attempt["score"] > original_score and (best is None or attempt["score"] >= best["score"]):
+        if attempt["score"] > original_score and (best is None or attempt["score"] > best["score"]):
             best = attempt
     return best
 
@@ -407,10 +432,9 @@ def pick_clues(evaluation: dict, count: int = MAX_CLUES, retries: dict | None = 
     retry_count 는 실마리를 찾은 때의 재도전 횟수 (그 뒤에 재도전했는지 clue_progress 가 본다)."""
     order = list(CRITERIA)
     retry_counts = retry_counts or {}
-    # 재도전을 MAX_RETRIES 번 모두 쓴 답은 더 고칠 수 없어서 실마리로 고르지 않는다
+    # 재도전 횟수 제한은 없다 (E-4B): 여러 번 재도전한 답도 실마리 후보다
     candidates = sorted(
-        (a for a in latest_answers(evaluation, retries)
-         if a["score"] < ANSWER_MAX and retry_counts.get(a["no"], 0) < MAX_RETRIES),
+        (a for a in latest_answers(evaluation, retries) if a["score"] < ANSWER_MAX),
         key=lambda x: (x["score"], x["no"]),
     )
     clues = []
@@ -537,6 +561,26 @@ def persona_lines(job: str, persona_type: str | None = None) -> list[str]:
     """시작 화면 배너용 면접관 소개: 페르소나 글(prompts.py)을 문장마다 나눈다. 글은 바꾸지 않고 '(역할)' 표시만 뺀다."""
     persona = persona_of(job, persona_type)["persona"].replace("(역할)", "").strip()
     return [s.strip().rstrip(".").rstrip() + "." for s in re.split(r"(?<=[.])\s+", persona) if s.strip()]
+
+
+PERSONA_BRIEF_SKILLS = 3  # 면접관 기본 소개에 보이는 핵심 평가 역량 개수 (나머지는 '자세히 보기')
+
+
+def persona_brief(job: str, persona_type: str | None = None) -> dict:
+    """면접 설정 화면의 면접관 기본 소개 (4개 직군 같은 구조). 페르소나 글(prompts.py)을 나눠 쓰기만 하고 바꾸지 않는다.
+    role: '(역할)' 앞 직책 · 경력 / skills: '꼭 본다' 문장의 항목 / tone: '말투는' 문장 / style: 진행 방식."""
+    persona = persona_of(job, persona_type)
+    lines = persona_lines(job, persona_type)
+    text = persona["persona"]
+    role = text.split("(역할)")[0].strip() if "(역할)" in text else (lines[0].rstrip(".") if lines else f"{job} 면접관")
+    skill_line = next((l for l in lines if "꼭 본다" in l), "")
+    skill_text = re.sub(r"\s*[을를] 꼭 본다\.$", "", skill_line)
+    skills = [s.strip() for s in re.split(r" · (?![^()]*\))", skill_text) if s.strip()]  # 괄호 안 ' · ' 는 나누지 않는다
+    tone = next((l for l in lines if l.startswith("말투는")), "")
+    style = (f"질문 {TOTAL_QUESTIONS}개를 진행하고, 답이 부족할 때만 꼬리 질문을 해요 (질문마다 {MAX_FOLLOW_UPS}개까지)"
+             if persona["style"] == "probe" else
+             f"질문 {TOTAL_QUESTIONS}개마다 꼬리 질문 {MAX_FOLLOW_UPS}개 뒤 짧은 피드백을 해요")
+    return {"role": role, "skills": skills, "tone": tone, "style": style}
 
 
 def persona_summary(job: str, persona_type: str | None = None) -> str:
@@ -821,7 +865,7 @@ def load_panel_rationale(path: Path = PANEL_RATIONALE_PATH) -> str:
 def build_retry(profile: dict, question: dict, before: str, weak: str) -> str:
     return RETRY.format(
         persona=persona_of(profile["job"], profile.get("persona_type"))["persona"],
-        context=build_context(profile),
+        context=build_context(profile, with_experience=False),
         question=question["question"],
         point=question["point"],
         before=before,
@@ -899,11 +943,14 @@ def answer_text(messages: list[dict], index: int) -> str:
 
 
 def format_record(questions: list[dict], messages: list[dict]) -> str:
-    """면접 기록을 질문별로 묶는다. 메시지의 'q' 는 질문 번호(0부터)."""
+    """면접 기록을 질문별로 묶는다 (평가 위원회 입력). 메시지의 'q' 는 질문 번호(0부터).
+    질문 은행의 '보는 점'이 있으면 질문 바로 아래에 붙인다. 옛 기록처럼 없으면 그 줄을 빼고 그대로."""
     names = {"assistant": "면접관", "user": "지원자"}
     blocks = []
     for i, q in enumerate(questions):
         lines = [f"[질문 {i + 1} · {q['type']}] {q['question']}"]
+        if str(q.get("point") or "").strip():
+            lines.append(f"[보는 점] {str(q['point']).strip()}")
         lines += [
             f"[{names[m['role']]}] {plain(m['content'])}"
             for m in messages
@@ -962,8 +1009,189 @@ def retry_order(answers: list[dict]) -> list[dict]:
 
 
 def summarize_retry(raw: dict) -> dict:
+    """옛 보정 방식 (점수를 범위 안으로 자르고 빠진 칸은 0점). 앱은 쓰지 않고 v1 기준 샘플 생성기 · 비교 테스트만 쓴다.
+    AI 응답 · 리포트 복원은 checked_retry (E-3 · E-5)."""
     scores = clamp_scores(raw)
     return {"scores": scores, "score": answer_score(scores), "weak": str(raw.get("weak", ""))}
+
+
+# AI 평가 응답 검증 (E-3). 원본의 구조 · 타입을 먼저 검사하고, 하나라도 어긋나면 저장하지 않는다.
+# 통과한 응답만 저장 모양으로 바꾸며, 이때 정수 점수의 범위 밖 값만 경계값으로 자른다 (CLAUDE.md '범위 밖이면 잘라 쓴다').
+# 빠진 점수 · 위원을 0점으로 채우거나 순서로 번호를 추측하지 않는다.
+# 문제 코드는 error_log.CODE 모양 (영문 + 경로, 값은 정수만) — 사용자 답변 · AI 응답 글은 들어가지 않는다.
+# 위원 내부 키: 화면 · 리포트는 한글 이름(PANEL_ROLES) 그대로, 검증 · 오류 기록 코드에만 영문 키를 쓴다.
+PANEL_KEYS = {
+    "실무 전문가": "practitioner",
+    "논리 분석가": "logician",
+    "커뮤니케이션 전문가": "communicator",
+    "채용 담당자": "recruiter",
+}
+EVAL_FIELDS = ("panel", "conflict", "agree", "answers", "next")
+SHOW_ITEMS = 2  # 평가 화면 목록의 기본 표시 개수 — 나머지는 [더 보기] (D6). 저장 데이터는 자르지 않는다
+
+
+class EvaluationInvalid(Exception):
+    """AI 평가 · 재도전 채점이 검증을 통과하지 못함. codes 는 오류 기록용 문제 코드 목록."""
+
+    def __init__(self, codes: list[str]):
+        super().__init__("evaluation response invalid")
+        self.codes = list(codes)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)  # True · 5.0 · "5" 는 정수가 아니다
+
+
+def _check_score(item: dict, field: str, path: str, codes: list):
+    """점수 칸: 있어야 하고 정수여야 한다. 범위는 검사하지 않는다 (저장할 때 checked_* 가 경계값으로 자른다)."""
+    if field not in item:
+        codes.append(f"field_missing:{path}")
+    elif not _is_int(item[field]):
+        codes.append(f"score_type:{path}")
+
+
+def _check_text(item: dict, field: str, path: str, codes: list):
+    """글 칸: 있어야 하고 문자열이어야 한다. 빈 문자열은 허용 (만점 답은 약한 점이 비어 온다)."""
+    if field not in item:
+        codes.append(f"field_missing:{path}")
+    elif not isinstance(item[field], str):
+        codes.append(f"text_type:{path}")
+
+
+def _check_text_list(value, path: str, codes: list):
+    if not isinstance(value, list):
+        codes.append(f"field_type:{path}")
+        return
+    codes.extend(f"text_type:{path}[{i}]" for i, v in enumerate(value) if not isinstance(v, str))
+
+
+def validate_evaluation(raw, questions: list[dict]) -> list[str]:
+    """AI 평가 원본 검사. 문제 코드 목록을 돌려준다 (빈 목록 = 통과)."""
+    if not isinstance(raw, dict):
+        return ["not_object:evaluation"]
+    codes = [f"field_missing:{f}" for f in EVAL_FIELDS if f not in raw]
+
+    panel = raw.get("panel")
+    if "panel" in raw and not isinstance(panel, list):
+        codes.append("field_type:panel")
+    elif isinstance(panel, list):
+        if len(panel) != len(PANEL_ROLES):
+            codes.append(f"panel_count:{len(panel)}")
+        seen = set()
+        for i, m in enumerate(panel):
+            if not isinstance(m, dict):
+                codes.append(f"not_object:panel[{i}]")
+                continue
+            key = PANEL_KEYS.get(m["role"]) if isinstance(m.get("role"), str) else None
+            if key is None:
+                codes.append(f"panel_role_unknown:panel[{i}]")
+                key = f"panel[{i}]"
+            elif key in seen:
+                codes.append(f"panel_role_duplicate:{key}")
+            seen.add(key)
+            _check_score(m, "score", f"{key}.score", codes)
+            _check_text(m, "against", f"{key}.against", codes)
+            _check_text(m, "good", f"{key}.good", codes)
+        codes += [f"panel_role_missing:{PANEL_KEYS[r]}" for r in PANEL_ROLES if PANEL_KEYS[r] not in seen]
+
+    for field in ("conflict", "agree"):
+        if field in raw and not isinstance(raw[field], str):
+            codes.append(f"text_type:{field}")
+
+    answers = raw.get("answers")
+    if "answers" in raw and not isinstance(answers, list):
+        codes.append("field_type:answers")
+    elif isinstance(answers, list):
+        if len(answers) != len(questions):
+            codes.append(f"answer_count:{len(answers)}")
+        numbers = set()
+        for i, a in enumerate(answers):
+            path = f"answers[{i}]"
+            if not isinstance(a, dict):
+                codes.append(f"not_object:{path}")
+                continue
+            no = a.get("no")
+            if "no" not in a:
+                codes.append(f"field_missing:{path}.no")
+            elif not _is_int(no):
+                codes.append(f"answer_no_type:{path}")
+            elif not 1 <= no <= len(questions):
+                codes.append(f"answer_no_range:{path}={no}" if -1000 < no < 1000 else f"answer_no_range:{path}")
+            elif no in numbers:
+                codes.append(f"answer_no_duplicate:{no}")
+            else:
+                numbers.add(no)
+            for key in CRITERIA:
+                _check_score(a, key, f"{path}.{key}", codes)
+            _check_text(a, "weak", f"{path}.weak", codes)
+            _check_text(a, "rewrite", f"{path}.rewrite", codes)
+            if "check" not in a:
+                codes.append(f"field_missing:{path}.check")
+            else:
+                _check_text_list(a["check"], f"{path}.check", codes)
+        codes += [f"answer_no_missing:{n}" for n in range(1, len(questions) + 1) if n not in numbers]
+
+    if "next" in raw:
+        _check_text_list(raw["next"], "next", codes)
+    return codes
+
+
+def checked_evaluation(raw, questions: list[dict]) -> dict:
+    """검증을 통과한 AI 평가만 저장 모양으로 바꾼다. 통과하지 못하면 EvaluationInvalid (아무것도 만들지 않음).
+    점수는 범위 밖이면 경계값으로 자르고 (위원 0~10 · 기준 0~5), 목록(check · next)은 원본 전체를 남긴다.
+    스키마 밖 칸은 옮기지 않는다. 원본(raw)은 바꾸지 않고 새 데이터를 만든다.
+    평균 · 합계 · 고친 답 여부는 자른 점수로 여기서 다시 계산한다 (AI 가 쓴 합계는 쓰지 않음)."""
+    codes = validate_evaluation(raw, questions)
+    if codes:
+        raise EvaluationInvalid(codes)
+    by_role = {m["role"]: m for m in raw["panel"]}
+    panel = [{"role": role, "against": by_role[role]["against"], "good": by_role[role]["good"],
+              "score": clamp(by_role[role]["score"], 0, PANEL_MAX)} for role in PANEL_ROLES]
+    by_number = {a["no"]: a for a in raw["answers"]}
+    answers = []
+    for i, q in enumerate(questions):
+        a = by_number[i + 1]
+        scores = {key: clamp(a[key], 0, CRITERION_MAX) for key in CRITERIA}
+        score = answer_score(scores)
+        answers.append({
+            "no": i + 1,
+            "question": q["question"],
+            "scores": scores,
+            "score": score,
+            "weak": a["weak"],
+            "rewrite": a["rewrite"],
+            "check": list(a["check"]),
+            "needs_rewrite": score < REWRITE_BELOW,
+        })
+    return {
+        "panel": panel,
+        "panel_average": panel_average(panel),
+        "conflict": raw["conflict"],
+        "agree": raw["agree"],
+        "answers": answers,
+        "next": list(raw["next"]),
+    }
+
+
+def validate_retry(raw) -> list[str]:
+    """AI 재도전 채점 원본 검사. 문제 코드 목록 (빈 목록 = 통과)."""
+    if not isinstance(raw, dict):
+        return ["not_object:retry"]
+    codes = []
+    for key in CRITERIA:
+        _check_score(raw, key, key, codes)
+    _check_text(raw, "weak", "weak", codes)
+    return codes
+
+
+def checked_retry(raw) -> dict:
+    """검증을 통과한 재도전 채점만 저장 모양으로 (summarize_retry 와 같은 모양). 통과하지 못하면 EvaluationInvalid.
+    점수는 범위 밖이면 0~5 로 자른다 (최초 평가와 같은 정책)."""
+    codes = validate_retry(raw)
+    if codes:
+        raise EvaluationInvalid(codes)
+    scores = {key: clamp(raw[key], 0, CRITERION_MAX) for key in CRITERIA}
+    return {"scores": scores, "score": answer_score(scores), "weak": raw["weak"]}
 
 
 # 위원 코치 피드백 (AI 호출 없음): 위원마다 PANEL_CRITERIA 에 가까운 기준 2개의 점수 변화로 고정 문장을 고른다.
@@ -1072,10 +1300,29 @@ def session_data(
     clue_round: int = 1,
     practice: list[dict] | None = None,
     past_hidden: list[dict] | None = None,
+    latest_unscored: dict | None = None,
+    retry_unreadable: dict | None = None,
+    evaluation_unreadable: list | None = None,
 ) -> dict:
     """'면접 없이 이어 하기' 용: 이 회차의 대화 · 평가 · 재도전(반영된 것 · 모든 기록) · 마지막 질문을 그대로 남긴다.
     practice: 연습 대본 [{question, script, round}] — 지난 회차 것까지 이어 붙인 목록 (merge_practice).
-    평가는 AI 응답과 같은 모양으로 남겨서, 읽을 때 summarize_evaluation() 으로 다시 검증 · 계산한다."""
+    평가는 AI 응답과 같은 모양으로 남겨서, 읽을 때 checked_evaluation() 으로 다시 검증 · 계산한다 (rebuild_session).
+    E-5 칸 (있을 때만 넣는다):
+      latest_unscored {질문: 답} — 채점받지 못한 최신 제출 답. 이미 채점받은 답(면접 때 답 · 재도전 기록)과 같으면 넣지 않는다
+      retry_unreadable {질문: [{attempt_id, raw}]} — 읽지 못한 재도전 기록 원본 (점수 계산에는 넣지 않음)
+      evaluation_unreadable [원본] — 읽지 못해 다시 평가받기 전의 최초 평가 원본
+    최고 점수 답(retries)과 횟수(retry_counts)는 기록에서 계산되는 값이지만 옛 앱 호환을 위해 같이 남긴다."""
+    history = retry_history or {}
+    unscored = {}
+    for no, answer in (latest_unscored or {}).items():
+        scored = {" ".join(a.split()) for a in [answer_text(messages, no - 1)] + [r["answer"] for r in history.get(no, [])]}
+        if isinstance(answer, str) and answer.strip() and " ".join(answer.split()) not in scored:
+            unscored[str(no)] = {"answer": answer}
+    extra = {
+        "latest_unscored": unscored,
+        "retry_unreadable": {str(no): items for no, items in (retry_unreadable or {}).items() if items},
+        "evaluation_unreadable": list(evaluation_unreadable or []),
+    }
     return {
         "messages": [
             {"role": m["role"], "content": m["content"], "q": m.get("q"), "kind": m.get("kind")}
@@ -1090,11 +1337,12 @@ def session_data(
                 for a in evaluation["answers"]
             ],
             "next": evaluation["next"],
-        },
+        } if evaluation else None,  # 평가 전 · 평가 실패 회차 (v2 통합 저장)
         "retries": {str(no): {"answer": r["answer"], **r["scores"], "weak": r["weak"]} for no, r in retries.items()},
         "retry_history": {
-            str(no): [{"answer": r["answer"], **r["scores"], "weak": r["weak"]} for r in attempts]
-            for no, attempts in (retry_history or {}).items()
+            str(no): [{"attempt_id": r.get("attempt_id") or attempt_id(no, i), "answer": r["answer"], **r["scores"],
+                       "weak": r["weak"]} for i, r in enumerate(attempts, 1)]
+            for no, attempts in history.items()
         },
         "retry_counts": {str(no): n for no, n in (retry_counts or {}).items()},
         # 역전의 실마리: 회차와 지금 보고 있는 실마리 (질문 번호 · 찾을 때 점수 · 찾을 때 재도전 횟수만)
@@ -1113,6 +1361,7 @@ def session_data(
         ][:MAX_PRACTICE],
         # 사용자가 지운 지난 회차 답 [{question, round}] — 지난 회차 것까지 이어 붙인 목록 (리포트 파일 자체는 바꾸지 않는다)
         "past_hidden": [{"question": h["question"], "round": h["round"]} for h in (past_hidden or [])][:MAX_PAST_HIDDEN],
+        **{key: value for key, value in extra.items() if value},
     }
 
 
@@ -1172,11 +1421,27 @@ def _trim(value, depth: int = 0):
     return None
 
 
-def _parse_session(raw) -> dict | None:
-    """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가)."""
+def _trim_attempt_lists(value) -> dict:
+    """재도전 기록 칸 {질문: [기록, ...]}: 목록을 40개로 자르지 않는다 (E-5). 질문당 MAX_ATTEMPTS_PER_QUESTION 을 넘으면
+    일부만 읽지 않고 파일 전체를 거부한다. 기록 하나 안의 글 · 칸은 _trim 과 같은 규칙으로 정리한다."""
+    if not isinstance(value, dict):
+        return {}
+    lists = {}
+    for key, items in list(value.items())[:MAX_SESSION_MESSAGES]:
+        if isinstance(items, list) and len(items) > MAX_ATTEMPTS_PER_QUESTION:
+            raise ValueError(f"재도전 기록이 너무 많은 리포트라 불러오지 않았어요 (질문당 {MAX_ATTEMPTS_PER_QUESTION}개 초과).")
+        lists[str(key)[:40]] = [_trim(item, 3) for item in items] if isinstance(items, list) else _trim(items, 2)
+    return lists
+
+
+def _parse_session(raw, allow_no_evaluation: bool = False) -> dict | None:
+    """숨은 데이터의 session 을 모양만 확인해서 읽는다. 없거나 모양이 다르면 None (면접 없이 이어 하기 불가).
+    재도전 기록이 질문당 한도를 넘으면 ValueError (자르지 않고 거부).
+    allow_no_evaluation: v2 의 평가 전 회차는 evaluation 이 null 이어도 읽는다."""
     if not isinstance(raw, dict):
         return None
-    raw = _trim(raw)
+    attempts = {key: _trim_attempt_lists(raw.get(key)) for key in ATTEMPT_LISTS if key in raw}
+    raw = {**_trim({k: v for k, v in raw.items() if k not in ATTEMPT_LISTS}), **attempts}
     messages = []
     for m in raw.get("messages") or []:
         if not isinstance(m, dict) or m.get("role") not in ("assistant", "user") or not isinstance(m.get("content"), str):
@@ -1189,7 +1454,7 @@ def _parse_session(raw) -> dict | None:
             "kind": "question" if m.get("kind") == "question" else None,
         })
     evaluation = raw.get("evaluation")
-    if not messages or not isinstance(evaluation, dict):
+    if not messages or not (isinstance(evaluation, dict) or (allow_no_evaluation and evaluation is None)):
         return None
     return {**raw, "messages": messages}
 
@@ -1214,41 +1479,111 @@ def rebuild_clues(raw, evaluation: dict, retries: dict) -> dict:
         clues.append({
             "no": no, "question": a["question"], "score": clamp(it.get("score"), 0, ANSWER_MAX), "weak": a["weak"],
             "criterion": key, "name": CRITERIA[key], "criterion_score": a["scores"][key],
-            "retry_count": clamp(it.get("retry_count"), 0, MAX_RETRIES),
+            "retry_count": clamp(it.get("retry_count"), 0, MAX_RETRY_COUNT),
         })
     return {"clue_round": clue_round, "clue_set": clues}
 
 
+def attempt_id(no: int, n: int) -> str:
+    """재도전 기록 ID: 질문 번호 + 그 질문의 n번째 기록 (예: q5-a3). 같은 파일을 여러 번 불러와도 같은 ID가 나온다.
+    회차를 넘어 고유한 ID 는 여러 회차를 담는 v2 에서 round_id 와 묶는다."""
+    return f"q{no}-a{n}"
+
+
+def next_attempt_id(no: int, *groups) -> str:
+    """새 재도전 기록의 ID: 이 질문에서 쓴 ID(읽은 기록 · 읽지 못한 기록 모두)의 가장 큰 번호 + 1."""
+    used = [int(m.group(2)) for items in groups for item in items or []
+            if isinstance(item, dict) and (m := ATTEMPT_ID.match(str(item.get("attempt_id", ""))))]
+    return attempt_id(no, max(used, default=0) + 1)
+
+
+def reflected_retries(evaluation: dict, history: dict) -> dict:
+    """질문마다 반영할 재도전 (최고 점수 · 동점이면 먼저 받은 것). 최고 점수 답은 저장하지 않고 기록에서 계산한다."""
+    original = {a["no"]: a["score"] for a in evaluation["answers"]}
+    best = {no: reflected_retry(original[no], attempts) for no, attempts in history.items() if no in original}
+    return {no: b for no, b in best.items() if b}
+
+
 def rebuild_session(session: dict, questions: list[dict]) -> dict:
-    """리포트의 session 으로 면접 끝난 상태를 다시 만든다. 점수 · 합계는 여기서 다시 검증 · 계산한다."""
-    evaluation = summarize_evaluation(session["evaluation"], questions)
-    def attempt(r) -> dict | None:
-        return {"answer": r["answer"], **summarize_retry(r)} if isinstance(r, dict) and isinstance(r.get("answer"), str) else None
+    """리포트의 session 으로 면접 끝난 상태를 다시 만든다. 점수 · 합계는 여기서 다시 검증 · 계산한다 (E-5).
+    - 최초 평가: AI 응답과 같은 검증(checked_evaluation · 범위 밖 정수는 보정). 통과하지 못하면 0점으로 채우지 않고
+      evaluation=None (대화 · 답만 부분 복원, 다시 평가받기) · 원본은 evaluation_unreadable 에 남겨 다시 저장해도 잃지 않는다.
+    - 재도전 기록: 기록마다 checked_retry. 읽지 못한 기록은 버리지 않고 원본을 retry_unreadable 에 남기고 점수에서 뺀다.
+      개수를 자르지 않는다 (질문당 한도 초과는 _parse_session 에서 거부). attempt_id 가 없으면 순서로 붙인다.
+    - 최고 점수 답(retries) · 횟수(retry_counts)는 파일 값을 쓰지 않고 기록에서 다시 계산한다.
+    problems: 복원하며 찾은 문제 (오류 기록 · 안내용) — evaluation: 평가 문제 코드, retry_unreadable: 읽지 못한 재도전 수."""
+    evaluation_unreadable = [e for e in session.get("evaluation_unreadable") or [] if e is not None]         if isinstance(session.get("evaluation_unreadable"), list) else []
+    try:
+        if session.get("evaluation") is None:  # 평가 전 · 평가 실패로 저장한 회차 (v2): 손상이 아니다
+            evaluation, evaluation_codes = None, []
+        else:
+            evaluation, evaluation_codes = checked_evaluation(session["evaluation"], questions), []
+    except EvaluationInvalid as e:
+        evaluation, evaluation_codes = None, e.codes
+        evaluation_unreadable.append(session["evaluation"])
 
     def question_no(key) -> int | None:
         return int(key) if str(key).isdigit() and 1 <= int(key) <= TOTAL_QUESTIONS else None
 
-    # 모든 재도전 기록. 기록이 없는 옛 리포트는 남아 있던 재도전 하나를 기록으로 쓴다.
+    # 읽지 못한 기록: 지난번에 읽지 못해 남겨 둔 것은 그대로 이어 간다 (질문 번호가 이상한 칸도 원본 키 그대로)
+    unreadable: dict = {}
+    for key, items in (session.get("retry_unreadable") or {}).items():
+        unreadable.setdefault(question_no(key) or key, []).extend(items if isinstance(items, list) else [items])
+    retry_codes: list[str] = []
+
+    def read_attempts(no, items) -> list[dict]:
+        """기록마다 ID 를 정하고 검증한다. 파일에 있는 이 질문의 ID 는 그대로 쓰고, 없거나 겹치면 순서(n번째)로,
+        순서 ID 가 이미 쓰였으면 쓴 번호 다음 번호로 붙인다 (같은 파일이면 늘 같은 결과)."""
+        def own(aid) -> bool:
+            m = ATTEMPT_ID.match(aid) if isinstance(aid, str) else None
+            return bool(m) and int(m.group(1)) == no
+
+        given = [item.get("attempt_id") if isinstance(item, dict) else None for item in items]
+        reserved = {u.get("attempt_id") for u in unreadable.get(no, []) if isinstance(u, dict)}
+        claimed = {a for a in given if own(a)} | {a for a in reserved if own(a)}
+        top = max([int(ATTEMPT_ID.match(a).group(2)) for a in claimed] + [len(items)], default=0)
+        attempts, seen = [], set(reserved)
+        for n, (item, aid) in enumerate(zip(items, given), 1):
+            if not own(aid) or aid in seen:
+                aid = attempt_id(no, n)
+                if aid in claimed or aid in seen:
+                    top += 1
+                    aid = attempt_id(no, top)
+            seen.add(aid)
+            try:
+                if not (isinstance(item, dict) and isinstance(item.get("answer"), str)):
+                    raise EvaluationInvalid(["not_object:retry" if not isinstance(item, dict) else "field_missing:answer"])
+                attempts.append({"attempt_id": aid, "answer": item["answer"], **checked_retry(item)})
+            except EvaluationInvalid as e:
+                unreadable.setdefault(no, []).append({"attempt_id": aid, "raw": item})
+                retry_codes.extend(e.codes)
+        return attempts
+
     history = {}
     for key, items in (session.get("retry_history") or {}).items():
-        attempts = [a for a in (attempt(r) for r in (items if isinstance(items, list) else [])) if a][:MAX_RETRIES]
-        if question_no(key) and attempts:
-            history[question_no(key)] = attempts
+        no = question_no(key)
+        if no is None or not isinstance(items, list):
+            unreadable.setdefault(key, []).append({"attempt_id": None, "raw": items})  # 모르는 질문 번호: 원본만 보존
+            retry_codes.append("retry_key_invalid")
+            continue
+        attempts = read_attempts(no, items)
+        if attempts:
+            history[no] = attempts
+    # 기록 기능 전 옛 리포트: 남아 있던 재도전 하나를 기록으로 쓴다
     for key, r in (session.get("retries") or {}).items():
-        if question_no(key) and question_no(key) not in history and attempt(r):
-            history[question_no(key)] = [attempt(r)]
-    # 반영 점수는 기록에서 다시 고른다 (최고 점수 반영 · 옛 리포트의 낮은 재도전도 여기서 걸러진다)
-    original = {a["no"]: a["score"] for a in evaluation["answers"]}
-    retries = {}
-    for no, attempts in history.items():
-        best = reflected_retry(original[no], attempts)
-        if best:
-            retries[no] = best
-    retry_counts = {
-        int(k): clamp(v, 0, MAX_RETRIES)
-        for k, v in (session.get("retry_counts") or {}).items()
-        if str(k).isdigit() and 1 <= int(k) <= TOTAL_QUESTIONS
-    }
+        no = question_no(key)
+        if no and no not in history and no not in unreadable:
+            attempts = read_attempts(no, [r])
+            if attempts:
+                history[no] = attempts
+
+    retries = reflected_retries(evaluation, history) if evaluation else {}
+    retry_counts = {no: len(attempts) for no, attempts in history.items()}  # 횟수는 기록 개수 (파일 값은 쓰지 않음)
+    latest_unscored = {}
+    for key, item in (session.get("latest_unscored") or {}).items():
+        no = question_no(key)
+        if no and isinstance(item, dict) and isinstance(item.get("answer"), str) and item["answer"].strip():
+            latest_unscored[no] = item["answer"]
 
     def pairs(items) -> list[tuple[str, str]]:
         return [
@@ -1268,7 +1603,12 @@ def rebuild_session(session: dict, questions: list[dict]) -> dict:
         "retries": retries,
         "retry_history": history,
         "retry_counts": retry_counts,
-        **rebuild_clues(session.get("clues"), evaluation, retries),
+        "latest_unscored": latest_unscored,
+        "retry_unreadable": unreadable,
+        "evaluation_unreadable": evaluation_unreadable,
+        "problems": {"evaluation": evaluation_codes, "retry_codes": retry_codes,
+                     "retry_unreadable": sum(len(v) for v in unreadable.values())},
+        **(rebuild_clues(session.get("clues"), evaluation, retries) if evaluation else {"clue_round": 1, "clue_set": None}),
         "last_suggest": pairs(session.get("last_suggest")) or None,
         "last_question": last_question if last_question and last_question["questions"] else None,
         "understanding": clamp(understanding, 0, 100) if isinstance(understanding, int) else None,
@@ -1291,6 +1631,7 @@ def report_data(
         "criteria_version": criteria_version(),
         "precheck": precheck,
         "version": REPORT_DATA_VERSION,
+        "revision": REPORT_DATA_REVISION,
         "round": round_no,
         "date": day.isoformat(),
         "profile": {
@@ -1318,6 +1659,8 @@ def _text(value, field: str) -> str:
 
 def parse_report(text: str) -> dict:
     """면접리포트.md 에서 숨겨 둔 데이터를 읽는다. 문제가 있으면 한국어 한 줄로 ValueError."""
+    if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError(f"리포트 파일이 너무 커서 불러오지 않았어요 ({MAX_REPORT_BYTES // (1024 * 1024)}MB 초과).")
     found = REPORT_DATA_RE.search(text)
     if not found:
         raise ValueError("이 파일에는 이어 하기 데이터가 없어요. 이 앱에서 받은 면접리포트.md 를 올려 주세요.")
@@ -1452,7 +1795,7 @@ def report_checklist(
     tried = f" · 재도전 총 {attempts}번" if attempts else ""
     if not evaluation or clues is None:
         retry = {"done": False, "detail": "평가 뒤에 열려요", "sub": []}
-    elif not clues["total"]:  # 모두 만점이거나 재도전 기회를 다 씀
+    elif not clues["total"]:  # 모두 만점
         retry = {"done": True, "detail": "남은 실마리 없음" + tried, "sub": []}
     else:
         retry = {
@@ -1579,8 +1922,13 @@ def build_report(
     verdict_open: bool = False,
     practice: list[dict] | None = None,
     past_hidden: list[dict] | None = None,
+    latest_unscored: dict | None = None,
+    retry_unreadable: dict | None = None,
+    evaluation_unreadable: list | None = None,
+    v2_section: bool = False,
 ) -> str:
-    """면접리포트.md. 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
+    """면접리포트.md.
+    v2_section=True: v2 통합 저장 파일 안의 회차 한 칸 (단계 체크리스트 · 사전 정보 · 회차별 숨은 데이터 없이 사람이 읽는 본문만). 재도전은 최고 점수만 반영하고, 반영되지 않은 재도전은 접기(<details>)로 남긴다.
     숫자는 모두 이 파일에서 계산한 값만 쓴다 (AI가 쓴 합계 · 숫자는 넣지 않음).
     AI가 쓴 글은 'AI 의견' 으로 구분해 넣는다. 끝에는 이 회차의 이어 하기 데이터를 숨겨 둔다.
     day 는 사용자 시간대의 오늘 (배포 서버 날짜는 UTC 라서 하루 다를 수 있다)."""
@@ -1600,11 +1948,11 @@ def build_report(
         "> 점수는 모두 앱이 계산한 값이에요. **AI 의견** 표시가 붙은 글은 AI가 쓴 것이라 사실인지 직접 확인해 주세요.",
         "",
         # 리포트 파일이 곧 '리포트 받기' 라서 7단계는 완료로 적는다
-        *checklist_report_lines(report_checklist(
+        *([] if v2_section else checklist_report_lines(report_checklist(
             messages, evaluation, clue_status(evaluation, retries, retry_counts or {}, clue_set, clue_round),
             verdict_open, memo, last_suggest, last_question, precheck_items, precheck, report_done=True,
             retries=retries, retry_history=retry_history,
-        )),
+        ))),
         "## 1. 점수",
         "",
         "### 위원 평가 (0~10)",
@@ -1737,17 +2085,21 @@ def build_report(
                 lines += ["", f"원래 질문에서 빠진 것: {last_question['why']}"]
 
     precheck = precheck or {}
+    if v2_section:
+        return "\n".join(lines) + "\n"
     if precheck_items:
         lines += ["", *precheck_report_lines(precheck_items, precheck)]
 
     session = session_data(messages, evaluation, retries, retry_counts, last_suggest, last_question, understanding, history,
-                           clue_set, clue_round, practice, past_hidden)
+                           clue_set, clue_round, practice, past_hidden, latest_unscored, retry_unreadable,
+                           evaluation_unreadable)
     lines += ["", embed_report_data(report_data(profile, questions, evaluation, retries, round_no, precheck, day, session))]
     return "\n".join(lines) + "\n"
 
 
 def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
-    """AI 평가를 범위 안으로 자르고, 평균 · 합계는 여기서 다시 계산한다."""
+    """옛 보정 방식: 평가를 범위 안으로 자르고 빠진 위원은 0점, 번호가 없으면 순서로 찾는다. 앱은 쓰지 않고
+    v1 기준 샘플 생성기 · 비교 테스트만 쓴다. AI 응답 · 리포트 복원은 checked_evaluation (E-3 · E-5)."""
     by_role = {m.get("role"): m for m in raw.get("panel", [])}
     panel = []
     for role in PANEL_ROLES:
@@ -1786,3 +2138,386 @@ def summarize_evaluation(raw: dict, questions: list[dict]) -> dict:
         "answers": answers,
         "next": [str(n) for n in raw.get("next", [])][:MAX_NEXT],
     }
+
+
+# ── 면접 기록 보관 (MVP1): 회사(또는 '기타') → 직군 → 회차 ─────────────────
+# 회차 레코드 하나 = 한 번의 면접 (질문 · 최초 답 · 평가 · 재도전 기록). 화면의 작업 상태는 지금 고른 회차 하나를 펼친 것이다.
+# 회사 · 회차 ID 생성 방식은 PRD 10.2 미확정 — 아래는 임시 규칙: 같은 입력이면 같은 ID (반복 업로드에 중복 생성 · 덮어쓰기가 없게).
+OTHER_GROUP = "기타"  # 회사를 정하지 않은 회차의 화면 그룹. 실제 회사명 '기타'(company_key '기타')와는 company_key 가 None 인지로 구분
+STORE_VERSION = 2
+MAX_STORE_ROUNDS = 500  # v2 파일 하나의 회차 수 안전 한도 (넘으면 일부만 읽지 않고 거부)
+INTERVIEW_TYPES = {"common": "공통 면접", "field": "분야별 면접"}
+# 회차 레코드의 작업 데이터 칸 (화면 상태와 같은 이름)
+ROUND_STATE_KEYS = (
+    "messages", "evaluation", "retries", "retry_history", "retry_counts", "retry_pending", "retry_unreadable",
+    "evaluation_unreadable", "understanding", "last_suggest", "last_question", "clue_set", "clue_round",
+    "verdict_open", "q_index", "follow_ups", "pending_answer",
+)
+
+
+def company_key(name) -> str | None:
+    """같은 회사 판단 키: 회사명의 앞뒤 공백만 뺀다 (중간 공백 · 대소문자는 그대로). 비어 있으면 None = 회사 미지정."""
+    key = str(name or "").strip()
+    return key or None
+
+
+def company_id_for(key: str | None) -> str | None:
+    """회사 ID (임시 규칙: company_key 로 만든 고정 값). 회사 미지정이면 None."""
+    return "c" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12] if key else None
+
+
+def new_round_id() -> str:
+    return "r" + uuid.uuid4().hex[:16]
+
+
+def interview_type_of(field: str) -> str:
+    """면접 유형: 분야 '공통' 이면 공통 면접, 아니면 분야별 면접 (회차를 나누는 기준이 아니다)."""
+    return "common" if field == DEFAULT_FIELD else "field"
+
+
+def group_name(record: dict) -> str:
+    return record.get("company_name") or OTHER_GROUP
+
+
+def same_group(record: dict, key: str | None, job: str) -> bool:
+    return record.get("company_key") == key and record.get("job") == job
+
+
+def group_rounds(rounds: list[dict], key: str | None, job: str) -> list[dict]:
+    """회사(또는 '기타') + 직군의 회차들 (회차 번호 · 날짜 순)."""
+    return sorted((r for r in rounds if same_group(r, key, job)), key=lambda r: (r["round_number"], r.get("date", "")))
+
+
+def next_round_number(rounds: list[dict], key: str | None, job: str) -> int:
+    """회차 번호: 회사(또는 '기타') + 직군 안에서 누적 (공통 · 분야별 면접이 같은 번호 체계, 재도전으로 늘지 않는다)."""
+    return min(max((r["round_number"] for r in rounds if same_group(r, key, job)), default=0) + 1, MAX_ROUND)
+
+
+def new_round(rounds: list[dict], *, company_name: str, company_desc: str, job: str, field: str, question_mode: str,
+              nickname: str, experience: str, questions: list[dict], day: date) -> dict:
+    """새 면접 회차 레코드 (면접 시작 때 만든다 · 아직 진행 중)."""
+    key = company_key(company_name)
+    return {
+        "round_id": new_round_id(),
+        "round_number": next_round_number(rounds, key, job),
+        "company_key": key,
+        "company_id": company_id_for(key),
+        "company_name": key or "",
+        "company_desc": (company_desc or "").strip(),
+        "job": job,
+        "field": field,
+        "interview_type": interview_type_of(field),
+        "question_mode": question_mode,
+        "date": day.isoformat(),
+        "nickname": nickname,
+        "experience": (experience or "").strip(),
+        "questions": questions,
+        "stage": "interview",
+        "messages": [], "evaluation": None, "retries": {}, "retry_history": {}, "retry_counts": {}, "retry_pending": {},
+        "retry_unreadable": {}, "evaluation_unreadable": [], "understanding": None, "last_suggest": None,
+        "last_question": None, "clue_set": None, "clue_round": 1, "verdict_open": False, "q_index": 0, "follow_ups": 0,
+        "pending_answer": None, "extra": {},
+    }
+
+
+def round_profile(record: dict) -> dict:
+    """회차의 지원 정보 (프롬프트 상황 블록 · 리포트가 쓰는 profile 모양)."""
+    return {"name": record.get("nickname") or "지원자", "field": record.get("field", DEFAULT_FIELD), "job": record["job"],
+            "company": record.get("company_name") or "", "company_desc": record.get("company_desc") or "",
+            "experience": record.get("experience") or "", "persona_type": None}
+
+
+def _raw_attempt(r: dict) -> dict:
+    return {"attempt_id": r.get("attempt_id"), "answer": r["answer"], **r["scores"], "weak": r["weak"]}
+
+
+def round_as_report(record: dict) -> dict:
+    """회차 레코드 → 지난 회차 비교 · 질문별 기록 · 회차 종합이 읽는 리포트 모양 (parse_report 결과와 같은 칸).
+    평가가 없는 회차는 scores 가 비어 있다 (옛 리포트 요약 회차는 저장된 점수를 쓴다)."""
+    ev = record.get("evaluation")
+    totals = total_scores(ev, record.get("retries") or {}) if ev else None
+    summary = record.get("summary") or {}
+    return {
+        "round": record["round_number"],
+        "date": record.get("date", ""),
+        "profile": round_profile(record),
+        "questions": [q["question"] for q in record.get("questions") or []],
+        "scores": [a["score"] for a in ev["answers"]] if ev else list(summary.get("scores") or []),
+        "panel_average": ev["panel_average"] if ev else float(summary.get("panel_average") or 0.0),
+        "total_latest": totals["latest"] if totals else summary.get("total_latest"),
+        "criteria_version": criteria_version() if ev else summary.get("criteria_version", ""),
+        "next": ev["next"] if ev else list(summary.get("next") or []),
+        "precheck": {},
+        "session": {
+            "messages": record.get("messages") or [],
+            "retry_history": {str(no): [_raw_attempt(r) for r in h] for no, h in (record.get("retry_history") or {}).items()},
+            **{k: v for k, v in (record.get("extra") or {}).items() if k in ("practice", "past_hidden")},
+        } if record.get("messages") else None,
+    }
+
+
+def previous_evaluated(rounds: list[dict], record: dict) -> dict | None:
+    """같은 회사(또는 '기타') · 직군에서 이 회차 바로 앞의 평가 있는 회차 (지난 면접과 비교용)."""
+    before = [r for r in group_rounds(rounds, record.get("company_key"), record["job"])
+              if r["round_number"] < record["round_number"]
+              and (r.get("evaluation") or (r.get("summary") or {}).get("scores"))]
+    return before[-1] if before else None
+
+
+def round_status(record: dict) -> str:
+    if record.get("stage") == "summary":
+        return "결과 요약만 (옛 리포트)"
+    if record.get("stage") != "done":
+        return "면접 진행 중"
+    return "평가 완료" if record.get("evaluation") else "평가 전"
+
+
+def _round_data(record: dict) -> dict:
+    """v2 파일에 남기는 회차 하나 (복원용 데이터)."""
+    data = {k: record.get(k) for k in ("round_id", "round_number", "company_id", "company_name", "company_key",
+                                       "company_desc", "job", "field", "interview_type", "question_mode", "date",
+                                       "experience")}
+    data["questions"] = [{k: q.get(k) for k in ("question_id", "type", "question", "point", "field")}
+                         for q in record.get("questions") or []]
+    if record.get("stage") == "summary":
+        data.update(status="summary", summary=record.get("summary") or {})
+        return data
+    extra = record.get("extra") or {}
+    data["status"] = "evaluated" if record.get("evaluation") else "evaluation_pending"
+    data["session"] = session_data(
+        record["messages"], record.get("evaluation"), record.get("retries") or {}, record.get("retry_counts") or {},
+        record.get("last_suggest"), record.get("last_question"), record.get("understanding"),
+        record.get("retry_history") or {}, record.get("clue_set"), record.get("clue_round") or 1,
+        extra.get("practice") or [], extra.get("past_hidden") or [], record.get("retry_pending") or {},
+        record.get("retry_unreadable") or {}, record.get("evaluation_unreadable") or [],
+    )
+    if extra.get("precheck"):
+        data["extra"] = {"precheck": extra["precheck"]}  # 옛 리포트의 사전 정보 탐색 기록 (화면에는 없지만 지우지 않는다)
+    return data
+
+
+def savable_rounds(rounds: list[dict]) -> list[dict]:
+    """파일에 남기는 회차: 면접을 마친 회차 (진행 중 면접의 저장 · 재개는 PRD 10.2 미확정이라 넣지 않는다)."""
+    return [r for r in rounds if r.get("stage") in ("done", "summary")]
+
+
+def store_data(rounds: list[dict], nickname: str, saved_at: str) -> dict:
+    kept = savable_rounds(rounds)
+    companies = {}
+    for r in kept:
+        if r.get("company_key"):
+            companies.setdefault(r["company_key"], {"company_id": r["company_id"], "company_name": r["company_name"],
+                                                    "company_key": r["company_key"]})
+    return {"version": STORE_VERSION, "nickname": nickname, "saved_at": saved_at,
+            "companies": list(companies.values()), "rounds": [_round_data(r) for r in kept]}
+
+
+def store_fingerprint(rounds: list[dict], nickname: str) -> str:
+    """저장 상태 확인용: 파일에 들어갈 내용이 같으면 같은 값 (저장 시각은 빼고 비교)."""
+    payload = json.dumps(store_data(rounds, nickname, ""), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def round_section(record: dict, rounds: list[dict], day: date) -> str:
+    """v2 파일의 회차 본문 (사람이 읽는 부분). 평가가 있으면 기존 리포트 본문, 없으면 질문 · 답만."""
+    profile = round_profile(record)
+    group = f"{group_name(record)} · {record['job']} · {record['round_number']}회차"
+    if record.get("evaluation"):
+        prev = previous_evaluated(rounds, record)
+        body = build_report(
+            profile, record["questions"], record["evaluation"], record.get("retries") or {}, record["messages"],
+            record.get("last_suggest"), record.get("last_question"), round_as_report(prev) if prev else None,
+            record["round_number"], None, None, None,
+            date.fromisoformat(record["date"]) if record.get("date") else day,
+            retry_counts=record.get("retry_counts"), understanding=record.get("understanding"),
+            retry_history=record.get("retry_history") or {}, clue_set=record.get("clue_set"),
+            clue_round=record.get("clue_round") or 1, v2_section=True,
+        )
+        return body.replace(f"# 면접 리포트 · {record['round_number']}회차", f"## {group}", 1)
+    lines = [f"## {group}", "", f"- 상태: {round_status(record)}", f"- 날짜: {record.get('date', '')}", ""]
+    for i, q in enumerate(record.get("questions") or []):
+        lines += [f"### 질문 {i + 1}. {q['question']}", ""]
+        if record.get("messages"):
+            lines += ["**내 답**", "", *_quote(answer_text(record["messages"], i) or "(답 없음)"), ""]
+    if record.get("stage") == "summary":
+        scores = (record.get("summary") or {}).get("scores") or []
+        lines += ["- 점수 (옛 리포트 요약): " + " · ".join(map(str, scores)), ""]
+    return "\n".join(lines)
+
+
+def build_store_file(rounds: list[dict], nickname: str, saved_at: str, day: date) -> str:
+    """Markdown v2 통합 저장: 여러 회사 · 직군 · 회차를 파일 하나에 (사람이 읽는 본문 + interview-data version 2)."""
+    kept = savable_rounds(rounds)
+    lines = ["# 역전 취업 코칭 — 면접 기록", "", f"- 닉네임: {nickname}", f"- 저장 시각: {saved_at}",
+             f"- 회차 {len(kept)}개", "",
+             "> 점수는 모두 앱이 계산한 값이에요. **AI 의견** 표시가 붙은 글은 AI가 쓴 것이라 사실인지 직접 확인해 주세요.", ""]
+    order = sorted(kept, key=lambda r: (r.get("company_key") is None, r.get("company_key") or "", r["job"],
+                                        r["round_number"]))
+    for record in order:
+        lines += [round_section(record, rounds, day), ""]
+    lines.append(embed_report_data(store_data(rounds, nickname, saved_at)))
+    return "\n".join(lines) + "\n"
+
+
+def store_file_name(day: date) -> str:
+    return f"{day.strftime('%y%m%d')}-역전취업코칭-면접기록.md"
+
+
+def _bank_questions(bank: pd.DataFrame | None, job: str, texts: list[str], field: str) -> list[dict]:
+    """질문 글 → 질문 은행의 질문 (question_id 포함). 은행에 없는 과거 질문은 글을 그대로 남기고 question_id 는 비워 둔다
+    (ID 매핑 실패 처리 방식은 PRD 10.2 미확정 — 보존 · 재도전 허용은 확정)."""
+    rows = []
+    for text in texts:
+        found = None
+        if bank is not None:
+            hit = bank[bank["직군"].isin(["공통", job]) & (bank["질문"] == text)]
+            found = question_row(hit.iloc[0]) if not hit.empty else None
+        rows.append(found or {"type": "", "question": text, "point": "", "field": field, "example": "",
+                              "question_id": None})
+    return rows
+
+
+def _record_from_session(base: dict, session: dict | None, questions: list[dict]) -> tuple[dict, dict]:
+    """복원: 회차 기본 칸 + session → 회차 레코드 (평가 · 재도전은 E-3 검증 · E-5 부분 복원 규칙 그대로)."""
+    record = {**base, "questions": questions, "extra": {}}
+    if session is None:
+        empty = {k: v for k, v in new_round([], company_name="", company_desc="", job=base["job"], field=base["field"],
+                                             question_mode="", nickname="", experience="", questions=[],
+                                             day=date.today()).items() if k in ROUND_STATE_KEYS}
+        return {**record, **empty, "stage": "summary"}, {"evaluation": [], "retry_codes": [], "retry_unreadable": 0}
+    s = rebuild_session(session, questions)
+    record.update({
+        "stage": "done", "messages": s["messages"], "evaluation": s["evaluation"], "retries": s["retries"],
+        "retry_history": s["retry_history"], "retry_counts": s["retry_counts"], "retry_pending": dict(s["latest_unscored"]),
+        "retry_unreadable": s["retry_unreadable"], "evaluation_unreadable": s["evaluation_unreadable"],
+        "understanding": s["understanding"], "last_suggest": s["last_suggest"], "last_question": s["last_question"],
+        "clue_set": s["clue_set"], "clue_round": s["clue_round"], "verdict_open": False,
+        "q_index": TOTAL_QUESTIONS, "follow_ups": 0, "pending_answer": None,
+    })
+    record["extra"] = {k: session[k] for k in ("practice", "past_hidden") if session.get(k)}
+    return record, s["problems"]
+
+
+def v1_round_id(parsed: dict) -> str:
+    """v1 파일의 회차 ID (임시 규칙: 회사 · 직군 · 회차 · 날짜 · 질문으로 만든 고정 값 — 같은 파일은 늘 같은 ID)."""
+    p = parsed["profile"]
+    basis = json.dumps([company_key(p["company"]), p["job"], parsed["round"], parsed["date"], parsed["questions"]],
+                       ensure_ascii=False)
+    return "v1" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _from_v1(text: str, bank: pd.DataFrame | None) -> list[tuple[dict, dict]]:
+    parsed = parse_report(text)
+    p = parsed["profile"]
+    key = company_key(p["company"])
+    questions = _bank_questions(bank, p["job"], parsed["questions"], p["field"])
+    base = {
+        "round_id": v1_round_id(parsed), "round_number": parsed["round"], "company_key": key,
+        "company_id": company_id_for(key), "company_name": key or "", "company_desc": p["company_desc"],
+        "job": p["job"], "field": p["field"], "interview_type": interview_type_of(p["field"]), "question_mode": "",
+        "date": parsed["date"], "nickname": p["name"], "experience": p["experience"],
+        "summary": {"scores": parsed["scores"], "panel_average": parsed["panel_average"],
+                    "total_latest": parsed["total_latest"], "criteria_version": parsed["criteria_version"],
+                    "next": parsed["next"]},
+    }
+    record, problems = _record_from_session(base, parsed["session"], questions)
+    if parsed["precheck"]:
+        record["extra"]["precheck"] = parsed["precheck"]
+    return [(record, problems)]
+
+
+def _from_v2(raw: dict, bank: pd.DataFrame | None) -> list[tuple[dict, dict]]:
+    out = []
+    for item in raw.get("rounds") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("round_id"), str) or item.get("job") not in JOBS:
+            raise ValueError("면접 기록 파일의 회차 데이터를 읽지 못했어요.")
+        key = company_key(item.get("company_key") or item.get("company_name"))
+        field = item.get("field") if item.get("field") in FIELDS else DEFAULT_FIELD
+        questions = []
+        for q in item.get("questions") or []:
+            q = q if isinstance(q, dict) else {}
+            text = _text(q.get("question"), "question")
+            matched = _bank_questions(bank, item["job"], [text], field)[0]
+            questions.append({**matched, "question_id": q.get("question_id") or matched["question_id"],
+                              "type": q.get("type") or matched["type"], "point": q.get("point") or matched["point"],
+                              "field": q.get("field") or matched["field"]})
+        if len(questions) != TOTAL_QUESTIONS:
+            raise ValueError("면접 기록 파일의 질문 데이터를 읽지 못했어요.")
+        number = item.get("round_number")
+        base = {
+            "round_id": item["round_id"][:40],
+            "round_number": clamp(number, 1, MAX_ROUND) if isinstance(number, int) else 1,
+            "company_key": key, "company_id": item.get("company_id") or company_id_for(key), "company_name": key or "",
+            "company_desc": _text(item.get("company_desc") or "", "company_desc"), "job": item["job"], "field": field,
+            "interview_type": interview_type_of(field), "question_mode": str(item.get("question_mode") or "")[:20],
+            "date": _text(item.get("date") or "", "date"), "nickname": _text(raw.get("nickname") or "", "nickname"),
+            "experience": _text(item.get("experience") or "", "experience"),
+            "summary": item.get("summary") if isinstance(item.get("summary"), dict) else {},
+        }
+        if item.get("status") == "summary":
+            record, problems = _record_from_session(base, None, questions)
+        else:
+            session = _parse_session(item.get("session"), allow_no_evaluation=True)
+            if session is None:
+                raise ValueError("면접 기록 파일의 대화 데이터를 읽지 못했어요.")
+            record, problems = _record_from_session(base, session, questions)
+        if isinstance(item.get("extra"), dict) and isinstance(item["extra"].get("precheck"), dict):
+            record["extra"]["precheck"] = item["extra"]["precheck"]
+        out.append((record, problems))
+    return out
+
+
+def parse_store_file(text: str, bank: pd.DataFrame | None = None) -> dict:
+    """불러오기: v1(회차 하나) · v2(통합) 파일 → {"version", "nickname", "rounds": [(레코드, 문제)]}.
+    문제가 있으면 한국어 한 줄로 ValueError (파일은 바꾸지 않는다). 손상된 평가 · 재도전은 E-5 규칙으로 부분 복원한다."""
+    if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError(f"리포트 파일이 너무 커서 불러오지 않았어요 ({MAX_REPORT_BYTES // (1024 * 1024)}MB 초과).")
+    found = REPORT_DATA_RE.search(text)
+    if not found:
+        raise ValueError("이 파일에는 복원할 데이터가 없어요. 이 앱에서 받은 면접 기록 파일(.md)을 올려 주세요.")
+    try:
+        raw = json.loads(found.group(1))
+    except json.JSONDecodeError:
+        raise ValueError("리포트의 이어 하기 데이터가 깨져 있어요.") from None
+    if isinstance(raw, dict) and raw.get("version") == STORE_VERSION:
+        if not isinstance(raw.get("rounds"), list) or len(raw["rounds"]) > MAX_STORE_ROUNDS:
+            raise ValueError("지원하지 않는 리포트 형식이에요.")
+        return {"version": 2, "nickname": str(raw.get("nickname") or "")[:40], "rounds": _from_v2(raw, bank)}
+    rounds = _from_v1(text, bank)  # version 1 이 아니면 parse_report 가 '지원하지 않는 형식' 으로 거부
+    return {"version": 1, "nickname": rounds[0][0].get("nickname", ""), "rounds": rounds}
+
+
+# ── 질문 출제: '똑같은 질문 — 과거 출제 질문에서 무작위 구성' (IA 4.1) ──
+RANDOM_NEED = {"common": (TOTAL_QUESTIONS, 0), "field": (2, 3)}  # (서로 다른 공통 질문 수, 이 분야 질문 수)
+
+
+def random_past_ready(interview_type: str, common_pool: list[dict], field_pool: list[dict]) -> bool:
+    """과거 질문 무작위 구성 조건: 공통 면접은 공통 질문 5개 이상, 분야별 면접은 공통 2개 + 분야 3개 이상."""
+    need_common, need_field = RANDOM_NEED[interview_type]
+    return len(common_pool) >= need_common and len(field_pool) >= need_field
+
+
+def random_past_questions(common_pool: list[dict], field_pool: list[dict], interview_type: str, rng=None) -> list[dict]:
+    """이 회사 · 직군에서 나온 질문으로 5개를 무작위로 (자기소개가 뽑히면 첫 자리). 조건은 random_past_ready."""
+    import random
+    rng = rng or random
+    need_common, need_field = RANDOM_NEED[interview_type]
+    picked = rng.sample(common_pool, need_common) + rng.sample(field_pool, need_field)
+    picked.sort(key=lambda q: "자기소개" not in q["question"])
+    return [dict(q) for q in picked]
+
+
+def record_from_mock(mock: dict, bank: pd.DataFrame | None) -> tuple[dict, dict]:
+    """개발용 모의 데이터(load_mock) → 회차 레코드 (v1 리포트와 같은 길)."""
+    p = mock["profile"]
+    key = company_key(p.get("company"))
+    field = field_of(p)
+    texts = [q if isinstance(q, str) else q.get("question", "") for q in mock.get("questions") or []]
+    base = {
+        "round_id": "mock-" + hashlib.sha1(json.dumps(texts, ensure_ascii=False).encode("utf-8")).hexdigest()[:12],
+        "round_number": clamp(mock.get("round", 1), 1, MAX_ROUND), "company_key": key, "company_id": company_id_for(key),
+        "company_name": key or "", "company_desc": p.get("company_desc", ""), "job": p["job"], "field": field,
+        "interview_type": interview_type_of(field), "question_mode": "", "date": str(mock.get("date") or date.today()),
+        "nickname": p.get("name", ""), "experience": p.get("experience", ""), "summary": {},
+    }
+    return _record_from_session(base, mock["session"], _bank_questions(bank, p["job"], texts, field))

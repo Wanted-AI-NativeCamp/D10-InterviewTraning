@@ -1,0 +1,5 @@
+# 테스트 전용 의존성. 배포(Streamlit Secrets · Cloud)는 requirements.txt 만 쓴다.
+# 설치: pip install -r requirements-dev.txt   ·   테스트: python -m unittest discover tests  (d10-interview 폴더에서)
+-r requirements.txt
+jsonschema>=4.0,<5    # 확인한 버전 4.26.0 · 가짜 AI 응답 스키마 검증 (tests/fake_llm.py · tests/test_fake_ai.py)
+numpy>=1.25,<3        # 확인한 버전 2.2.6 · 무작위 출제 시드 고정 (tests/test_engine.py) · streamlit 의 numpy 조건과 같음

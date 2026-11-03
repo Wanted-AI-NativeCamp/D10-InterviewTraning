@@ -1,0 +1,19 @@
+{
+ "_note": "면접관 응답 (INTERVIEWER_SCHEMA · ask_json name 'interviewer'). cases 는 응답 하나, sequences 는 5문항 면접을 끝까지 진행하는 응답 순서. edge_cases 는 스키마는 맞지만 값이 범위 밖인 응답 (앱이 잘라 쓴다).",
+ "cases": {
+  "follow_up": {"reply": "결과는 이해했습니다. 그 수치는 어떤 방법으로, 몇 명을 대상으로 확인하셨나요?", "follow_up": true, "understanding": 55},
+  "enough": {"reply": "네, 이해했습니다.", "follow_up": false, "understanding": 62},
+  "wants_more": {"reply": "그때 팀에서 반대 의견은 없었나요?", "follow_up": true, "understanding": 64},
+  "feedback_follow_up": {"reply": "그 화면을 바꾸기로 결정한 근거는 무엇이었나요?", "follow_up": true, "understanding": 58},
+  "feedback_review": {"reply": "강점은 문제를 사용자 관찰로 찾은 점이에요. 보완점은 결과를 숫자로 확인한 과정이 빠진 점이에요. 다음에는 측정 방법을 한 문장 더해 보세요.", "follow_up": false, "understanding": 66},
+  "feedback_review_flag_true": {"reply": "강점은 협업 과정을 구체적으로 말한 점이에요. 보완점은 본인 역할이 흐린 점이에요.", "follow_up": true, "understanding": 67}
+ },
+ "edge_cases": {
+  "understanding_out_of_range": {"reply": "네, 이해했습니다.", "follow_up": false, "understanding": 150}
+ },
+ "sequences": {
+  "probe_one_follow_up": ["follow_up", "enough", "enough", "enough", "enough", "enough"],
+  "probe_follow_up_limit": ["follow_up", "wants_more", "enough", "enough", "enough", "enough"],
+  "feedback_every_question": ["feedback_follow_up", "feedback_review", "feedback_follow_up", "feedback_review", "feedback_follow_up", "feedback_review", "feedback_follow_up", "feedback_review", "feedback_follow_up", "feedback_review_flag_true"]
+ }
+}
