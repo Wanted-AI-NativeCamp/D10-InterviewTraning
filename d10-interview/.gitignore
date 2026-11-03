@@ -4,3 +4,4 @@ __pycache__/
 /delete/
 .claude/settings.local.json
 logs/
+.venv/
