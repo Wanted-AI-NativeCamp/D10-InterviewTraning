@@ -206,6 +206,20 @@ class GnbLnbScreenTest(AppFlowCase):
         self.no_exception()
         self.assertEqual(len(self.ss["store_rounds"]), 1)
         self.assertIn("건너뛰었어요", " ".join(s.value for s in self.at.success))
+        self.assertIn("b.md · 예전 면접리포트(v1) · 새로 불러온 회차는 없어요.", " ".join(s.value for s in self.at.success))
+
+    def test_reupload_only_skipped_still_opens_records(self):
+        """같은 파일만 다시 올려 새 회차가 0개여도, 건너뛴 회차는 보관함에 있으니 [면접 기록 보기] 가 보인다."""
+        self.open_app({})
+        self.ss["store_rounds"].append(load_v1())               # 앞서 복원해 둔 회차 (파일 칸은 비운 상태)
+        self.at.button(key="title_resume").click().run()
+        self.at.get("file_uploader")[0].upload("a.md", v1_text().encode("utf-8"), "text/markdown").run()
+        self.no_exception()
+        self.assertEqual(len(self.ss["store_rounds"]), 1)       # 중복 생성 없음
+        self.assertIn("이미 있던 회차 1개는 다시 만들지 않고 건너뛰었어요.", " ".join(s.value for s in self.at.success))
+        self.click("면접 기록 보기")
+        self.assertEqual(self.ss["page"], "coaching")
+        self.assertEqual(self.fake.calls, [])
 
     def test_unsaved_indicator_after_interview(self):
         self.open_app({"interviewer": sequence("probe_one_follow_up"), "evaluation": [response("evaluation", "mixed")]})

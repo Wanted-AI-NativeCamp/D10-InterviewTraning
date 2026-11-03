@@ -2189,11 +2189,13 @@ def page_restore():
             st.error(result["error"])
             continue
         kind = "통합 저장(v2)" if result["version"] == 2 else "예전 면접리포트(v1)"
-        st.success(f"{result['name']} · {kind} · 회차 {result['added']}개를 불러왔어요."
-                   + (f" 이미 있던 회차 {result['skipped']}개는 건너뛰었어요." if result["skipped"] else ""))
+        loaded = f"회차 {result['added']}개를 불러왔어요." if result["added"] else "새로 불러온 회차는 없어요."
+        st.success(f"{result['name']} · {kind} · {loaded}"
+                   + (f" 이미 있던 회차 {result['skipped']}개는 다시 만들지 않고 건너뛰었어요." if result["skipped"] else ""))
         for warning in result["warnings"]:
             st.warning(warning)
-    if any("error" not in r and r["added"] for r in shown):
+    # 건너뛴 회차도 보관함에 이미 있는 기록이라, 새로 더한 회차가 없어도 기록 보기로 갈 수 있다
+    if any("error" not in r and (r["added"] or r["skipped"]) for r in shown):
         st.button(":material/forum: 면접 기록 보기", type="primary", key="restore_open", on_click=go_page, args=("coaching",))
     if DEV_MOCK:  # 개발용: .env 에 DEV_MOCK=1 일 때만. AI를 부르지 않고 만점 모의 회차를 넣는다
         if st.button(":material/science: 모의 데이터로 열기 (개발용 · 만점)", key="restore_mock"):
