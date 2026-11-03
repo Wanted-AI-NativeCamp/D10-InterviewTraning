@@ -162,14 +162,35 @@ class GnbLnbScreenTest(AppFlowCase):
     def test_start_screen_paths_and_nickname(self):
         self.open_app({})
         self.assertEqual(self.ss["page"], "start")
-        self.assertTrue(self.ss["nickname"])
+        # 긍정적인 수식어 + 동물 + 세 자리 숫자 (예: 합격을 예감한 토끼 183)
+        modifiers = ["합격을 예감한", "당당한 척 잘하는", "오늘도 성장하는", "기회를 낚아채는", "내일이 기대되는",
+                     "자신감을 충전한", "출근을 꿈꾸는", "역전을 준비하는", "꿈을 향해 달리는", "칭찬에 춤추는"]
+        animals = ["토끼", "수달", "판다", "펭귄", "쿼카", "햄스터", "고양이", "다람쥐", "여우", "고래", "부엉이", "사슴"]
+        pattern = rf"^({'|'.join(modifiers)}) ({'|'.join(animals)}) \d{{3}}$"
+        self.assertRegex(self.ss["nickname"], pattern)
+        self.assertLessEqual(len(self.ss["nickname"]), 20)  # 홈의 닉네임 칸 글자 수 안
+        nickname = self.ss["nickname"]
         labels = [b.label for b in self.at.button]
         self.assertTrue(any("새 면접 시작" in l for l in labels))
         self.assertTrue(any("Markdown 복원" in l for l in labels))
-        self.at.button(key="title_home").click().run()
+        self.assertFalse([b for b in self.at.button if b.key == "title_home"])  # 시작 화면에는 [홈] 없음
+        self.assertNotIn("닉네임은 홈에서", " ".join(m.value for m in self.at.markdown))
+        self.at.button(key="title_new").click().run()
+        self.at.button(key="gnb_home").click().run()               # 서비스 안의 GNB 홈은 그대로
         self.assertEqual(self.ss["page"], "home")
+        self.assertEqual(self.ss["nickname"], nickname)            # 화면을 옮겨도 닉네임은 그대로
+        # 환영 카드: 평소에는 입력칸 없이 [닉네임 수정] → 입력칸 · [저장]
+        self.assertIn(f"반가워요, {nickname} 님!", " ".join(m.value for m in self.at.markdown))
+        self.assertFalse([w for w in self.at.text_input if w.key == "nickname_input"])
+        self.at.button(key="nickname_edit").click().run()
+        self.assertEqual(self.at.text_input(key="nickname_input").value, nickname)
         self.at.text_input(key="nickname_input").input("새 닉네임").run()
+        self.assertEqual(self.ss["nickname"], nickname)            # 저장 전에는 그대로
+        self.at.button(key="nickname_save").click().run()
         self.assertEqual(self.ss["nickname"], "새 닉네임")
+        self.assertFalse([w for w in self.at.text_input if w.key == "nickname_input"])
+        # 저장 · 복원 버튼은 GNB 에만 (홈 본문에서 중복 노출하지 않는다)
+        self.assertFalse([b for b in self.at.button if b.key in ("home_save", "home_restore")])
         gnb = [b.label for b in self.at.button if b.key and b.key.startswith("gnb_")]
         self.assertEqual(len([l for l in gnb if "홈" in l or "면접 코칭" in l]), 2)  # GNB 1 · 2 (3 · 4 는 2차 MVP)
 
@@ -238,6 +259,19 @@ class GnbLnbScreenTest(AppFlowCase):
         self.assertTrue([b for b in self.at.button if b.key == "restart_go"])
         self.assertEqual(len(self.ss["store_rounds"]), 1)  # 누르기 전에는 그대로
 
+    def test_home_status_counts(self):
+        """나의 면접 현황: 면접 기록 = 완료 + 진행 중. 진행 중 면접은 있을 때만 위쪽 카드로."""
+        self.open_app({"interviewer": sequence("probe_one_follow_up") * 2})
+        self.start_interview()
+        self.finish()                                              # 완료 1 (평가 전)
+        self.start_interview()
+        self.answer("답 하나")                                     # 진행 중 1
+        self.at.button(key="gnb_home").click().run()
+        values = {m.label: m.value for m in self.at.metric}
+        self.assertEqual((values["면접 기록"], values["완료한 면접"], values["진행 중인 면접"]), ("2", "1", "1"))
+        self.assertIn("질문 1 / 5", " ".join(m.value for m in self.at.markdown))
+        self.assertEqual(len([b for b in self.at.button if b.key and b.key.startswith("home_resume_")]), 1)
+
     def test_leaving_interview_keeps_round(self):
         """면접 중 홈으로 가도 회차는 세션에 남고, 홈에서 이어서 할 수 있다."""
         self.open_app({"interviewer": sequence("probe_one_follow_up")})
@@ -277,6 +311,72 @@ class GnbLnbScreenTest(AppFlowCase):
             self.assertNotIn(removed, text)
         self.assertEqual(list(self.at.segmented_control(key="lnb").options),
                          [l.split(": ", 1)[1] for l in (LNB_EVAL, LNB_RECORDS, LNB_RETRY)])  # 평가 기록이 먼저
+
+    def test_home_empty_shows_first_start_only(self):
+        """기록 0개: 0 만 반복되는 현황 · 최근 면접 · [면접 기록 보기] 없이 첫 면접 시작만. 복원은 GNB 에 그대로."""
+        self.open_app({})
+        self.at.button(key="title_new").click().run()
+        self.at.button(key="gnb_home").click().run()
+        self.no_exception()
+        self.assertEqual(len(self.at.metric), 0)
+        keys = [b.key for b in self.at.button]
+        self.assertIn("home_new", keys)
+        self.assertNotIn("home_records", keys)
+        self.assertFalse([k for k in keys if k and k.startswith("home_round_")])
+        self.assertTrue([b for b in self.at.button if b.key and b.key.startswith("gnb_") and "Markdown 복원" in b.label])
+        self.at.button(key="home_new").click().run()
+        self.assertEqual(self.ss["page"], "setup")
+
+    def test_home_recent_rounds_top3(self):
+        """최근 면접은 최대 3개, 나중 회차가 위. 누르면 그 회차의 면접 기록 확인 화면."""
+        rounds = []
+        for company in ("A", "B", "C", "D"):
+            interview_record(rounds, company)
+        text = coach.build_store_file(rounds, "테스터", "2026-11-02 12:00", DAY)
+        self.open_app({})
+        self.at.button(key="title_resume").click().run()
+        self.at.get("file_uploader")[0].upload("기록.md", text.encode("utf-8"), "text/markdown").run()
+        self.at.button(key="gnb_home").click().run()
+        self.no_exception()
+        recent = [b for b in self.at.button if b.key and b.key.startswith("home_round_")]
+        self.assertEqual(len(recent), 3)
+        stored = self.ss["store_rounds"]
+        newest = next(r for r in stored if r.get("company_name") == "D")
+        self.assertEqual(recent[0].key, f"home_round_{newest['round_id']}")
+        self.assertNotIn(f"home_round_{next(r for r in stored if r.get('company_name') == 'A')['round_id']}",
+                         [b.key for b in recent])
+        recent[0].click().run()
+        self.no_exception()
+        self.assertEqual((self.ss["page"], self.ss["lnb"], self.ss["records_round"]),
+                         ("coaching", LNB_RECORDS, newest["round_id"]))
+        self.assertEqual(self.fake.calls, [])
+
+    def test_review_banner_only_in_fake_mode(self):
+        """가짜 AI 검토 모드 안내는 검토용 실행기가 llm.REVIEW_FAKE_AI 를 켰을 때만 (운영에서는 보이지 않음)."""
+        import llm
+        self.open_app({})
+        self.assertFalse([w for w in self.at.warning if "화면 검토 모드" in w.value])
+        llm.REVIEW_FAKE_AI = True
+        try:
+            self.at.run()
+            self.assertTrue([w for w in self.at.warning if "화면 검토 모드" in w.value])
+        finally:
+            del llm.REVIEW_FAKE_AI
+
+
+class InterviewerPromptTest(unittest.TestCase):
+    """면접관 지시문: 원래 질문 · 보는 점이 들어가고, 꼬리 질문 규칙(가정형 구분 · 전제 금지 · 보는 점 유지)이 있다."""
+
+    def test_interviewer_rules(self):
+        questions = coach.pick_questions(BANK, "디자인")
+        profile = {"job": "디자인", "company": "", "experience": ""}
+        text = coach.build_interviewer(profile, questions[0])
+        self.assertIn(questions[0]["question"], text)
+        self.assertIn(questions[0]["point"], text)
+        for rule in ("가정형", "전제하지 마", "[보는 점]에서 벗어나지 마", "검증 계획"):
+            self.assertIn(rule, text)
+        self.assertNotIn("⑨", text)
+        self.assertEqual(coach.MAX_FOLLOW_UPS, 1)
 
 
 if __name__ == "__main__":

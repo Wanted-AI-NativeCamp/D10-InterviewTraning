@@ -563,6 +563,26 @@ def persona_lines(job: str, persona_type: str | None = None) -> list[str]:
     return [s.strip().rstrip(".").rstrip() + "." for s in re.split(r"(?<=[.])\s+", persona) if s.strip()]
 
 
+PERSONA_BRIEF_SKILLS = 3  # 면접관 기본 소개에 보이는 핵심 평가 역량 개수 (나머지는 '자세히 보기')
+
+
+def persona_brief(job: str, persona_type: str | None = None) -> dict:
+    """면접 설정 화면의 면접관 기본 소개 (4개 직군 같은 구조). 페르소나 글(prompts.py)을 나눠 쓰기만 하고 바꾸지 않는다.
+    role: '(역할)' 앞 직책 · 경력 / skills: '꼭 본다' 문장의 항목 / tone: '말투는' 문장 / style: 진행 방식."""
+    persona = persona_of(job, persona_type)
+    lines = persona_lines(job, persona_type)
+    text = persona["persona"]
+    role = text.split("(역할)")[0].strip() if "(역할)" in text else (lines[0].rstrip(".") if lines else f"{job} 면접관")
+    skill_line = next((l for l in lines if "꼭 본다" in l), "")
+    skill_text = re.sub(r"\s*[을를] 꼭 본다\.$", "", skill_line)
+    skills = [s.strip() for s in re.split(r" · (?![^()]*\))", skill_text) if s.strip()]  # 괄호 안 ' · ' 는 나누지 않는다
+    tone = next((l for l in lines if l.startswith("말투는")), "")
+    style = (f"질문 {TOTAL_QUESTIONS}개를 진행하고, 답이 부족할 때만 꼬리 질문을 해요 (질문마다 {MAX_FOLLOW_UPS}개까지)"
+             if persona["style"] == "probe" else
+             f"질문 {TOTAL_QUESTIONS}개마다 꼬리 질문 {MAX_FOLLOW_UPS}개 뒤 짧은 피드백을 해요")
+    return {"role": role, "skills": skills, "tone": tone, "style": style}
+
+
 def persona_summary(job: str, persona_type: str | None = None) -> str:
     """브리핑용 면접관 한 줄 (페르소나의 첫 문장)."""
     persona = persona_of(job, persona_type)["persona"].strip()

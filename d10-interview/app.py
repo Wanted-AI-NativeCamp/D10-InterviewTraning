@@ -40,26 +40,112 @@ def hover_css() -> str:
     탭은 호버 때 글자색이 바뀌지 않게. (Streamlit 기본은 버튼 종류마다 하늘색 · 회색 · 진한 색으로 제각각)
     고른 탭은 Streamlit 기본 밑줄 그대로 (채운 바탕은 위쪽 모서리 둥글리기를 보장할 수 없어서 쓰지 않는다).
     코드 칸(리포트 미리보기)의 마크다운 제목은 Streamlit 기본이 빨강(.token.important)이라 강조색으로.
-    다크에서는 글자라서 강조색(#4263D6, 바탕 대비 3.2)보다 밝은 같은 계열(config.toml linkColor #9DB0F0)을 쓴다."""
+    다크에서는 글자라서 강조색(#3D7BFF)보다 밝은 같은 계열(config.toml linkColor #8DB4FF)을 쓴다."""
     dark = getattr(st.context.theme, "type", None) == "dark"
-    accent = "#4263D6" if dark else "#10256B"  # config.toml 강조색과 같게
-    heading = "#9DB0F0" if dark else "#10256B"
+    accent = "#3D7BFF" if dark else "#0252DE"  # config.toml 강조색(브랜드 블루)과 같게
+    heading = "#8DB4FF" if dark else "#0B1020"
     # 타이틀 화면 판: 라이트는 화이트 → 아이스 블루, 다크는 어두운 남색 (다크 바탕에 흰 판은 눈부셔서)
     if dark:
         title = {"bg": "radial-gradient(ellipse at 50% 30%, #16307F 0%, #0A1030 45%, #05070F 100%)",
-                 "bar": "linear-gradient(90deg, #05070F, #16307F 50%, #05070F)", "border": "transparent",
+                 "bar": "#0A1030", "border": "transparent",
                  "text": "#C2C4C8", "caption": "#878A93", "glow": "rgba(66, 99, 214, 0.55)",
                  "sub_bg": "rgba(255, 255, 255, 0.04)", "sub_border": "rgba(157, 176, 240, 0.55)", "sub_text": "#E8EBF5",
                  "sub_hover": "rgba(157, 176, 240, 0.14)", "focus": "#9DB0F0",
                  "head": "#E8EBF5", "haze1": "rgba(66, 99, 214, 0.35)", "haze2": "rgba(157, 176, 240, 0.18)"}
     else:
         title = {"bg": "linear-gradient(180deg, #FFFFFF 0%, #EEF6FF 50%, #D6EAFB 100%)",
-                 "bar": "linear-gradient(90deg, #FFFFFF, #E3F0FD 50%, #FFFFFF)", "border": "#D6E4F2",
+                 "bar": "#FFFFFF", "border": "#E6E9F0",
                  "text": "#46474C", "caption": "#5A5C63", "glow": "rgba(31, 37, 92, 0.25)",
                  "sub_bg": "#FFFFFF", "sub_border": "#B9C6F2", "sub_text": "#10256B",
                  "sub_hover": "#EEF3FF", "focus": "#10256B",
                  "head": "#10256B", "haze1": "rgba(255, 255, 255, 0.9)", "haze2": "rgba(110, 170, 235, 0.5)"}
+    # 홈: 히어로 판 + 2열 (왼쪽 현황 카드 · 최근 면접 / 오른쪽 고정 요약 카드).
+    # 디자인 시스템 (prd/design.md): 포인트는 브랜드 블루 하나, 판 · 카드는 그라데이션 · 그림자 없이 단색 + 옅은 테두리
+    if dark:
+        home = {"point": "#3D7BFF", "point_hover": "#5A8FFF", "point_text": "#8DB4FF", "point_soft": "rgba(61, 123, 255, 0.12)",
+                "hero": "#1E2230", "card": "#212225",
+                "line": "#37383C", "title": "#F7F7F8", "text": "#C2C4C8", "chip": "#292A2D"}
+    else:
+        home = {"point": "#0252DE", "point_hover": "#0242B2", "point_text": "#0252DE", "point_soft": "#EAF1FE",
+                "hero": "#F5F8FE", "card": "#FFFFFF",
+                "line": "#E6E9F0", "title": "#0B1020", "text": "#444D63", "chip": "#F4F5F8"}
     return f"""<style>
+/* 홈 (page_home): 히어로(인사) → 2열 [진행 중인 면접 · 나의 면접 현황 카드 3개 · 최근 면접 | 새 면접 요약 카드 (고정)]
+   / 기록 0개면 히어로 + 첫 면접 시작. 홈만 본문 폭을 넓힌다 (다른 화면은 기본 폭 그대로) */
+[data-testid="stMainBlockContainer"]:has(.st-key-home_page) {{ max-width: 1120px; }}
+.st-key-home_page {{ gap: 40px; }}
+.st-key-home_page [data-testid="stMarkdown"] {{ margin-bottom: 0 !important; }}  /* 글 칸 기본 음수 아래 여백 → 0 */
+.st-key-home_page button [data-testid="stMarkdownContainer"] p {{ color: inherit !important; }}  /* 버튼 글자는 버튼 색 그대로 */
+.st-key-home_page [data-testid="stBaseButton-primary"] {{ background-color: {home["point"]} !important;
+  border-color: {home["point"]} !important; color: #FFFFFF !important; }}
+.st-key-home_page [data-testid="stBaseButton-primary"]:hover:not(:disabled),
+.st-key-home_page [data-testid="stBaseButton-primary"]:focus-visible {{ background-color: {home["point_hover"]} !important;
+  border-color: {home["point_hover"]} !important; }}
+/* ① 히어로: 옅은 브랜드 블루 단색 판 (글만 두고, 높이는 예전 아이콘 타일 기준 200px 을 지킨다) */
+.st-key-home_welcome {{ background: {home["hero"]}; border-radius: 24px; padding: 40px 44px; gap: 24px; align-items: center;
+  min-height: 200px; }}
+.st-key-home_hero_text {{ gap: 16px; }}
+.st-key-home_hero_copy {{ gap: 4px; }}
+.st-key-home_hero_copy [data-testid="stMarkdownContainer"] {{ margin-bottom: 0; }}  /* 글 칸이 실제 글 높이만큼 (겹침 방지) */
+.st-key-nickname_edit button {{ min-height: 32px; padding: 4px 12px; border-radius: 8px; font-size: 0.875rem;
+  border: 1px solid {home["line"]}; background: {home["card"]}; color: {home["text"]} !important; }}
+.st-key-nickname_edit button:hover {{ border-color: {home["point"]}; color: {home["point_text"]} !important; }}
+.st-key-home_hello [data-testid="stMarkdownContainer"] p {{
+  color: {home["title"]} !important; font-size: 2rem; font-weight: 700; line-height: 1.38; letter-spacing: -0.6px;
+  word-break: keep-all; margin: 0; }}
+.st-key-home_sub [data-testid="stMarkdownContainer"] p {{ color: {home["text"]} !important; font-size: 1rem; margin: 0; }}
+@media (max-width: 640px) {{
+  .st-key-home_welcome {{ padding: 28px 22px; border-radius: 20px; min-height: 0; }}
+  .st-key-home_hello [data-testid="stMarkdownContainer"] p {{ font-size: 1.5rem; }} }}
+/* 2열: 오른쪽 요약 카드는 스크롤해도 붙어 있게 (좁은 화면에서는 아래로 쌓여 고정을 푼다) */
+.st-key-home_main {{ gap: 40px; }}
+[data-testid="stColumn"]:has(> div > .st-key-home_side), [data-testid="stColumn"]:has(.st-key-home_side) {{
+  position: sticky; top: 76px; align-self: flex-start; }}
+@media (max-width: 640px) {{ [data-testid="stColumn"]:has(.st-key-home_side) {{ position: static; }} }}
+.st-key-home_page [data-testid="stHeading"] h3 {{ font-size: 1.375rem; color: {home["title"]}; }}
+/* ② 진행 중인 면접: 옅은 브랜드 블루 바탕으로만 구분 (강조 테두리 없음) */
+.st-key-home_running {{ background: {home["point_soft"]}; border-radius: 20px; padding: 18px 22px; gap: 6px; }}
+.st-key-home_running [data-testid="stMarkdownContainer"] p {{ color: {home["text"]}; }}
+.st-key-home_running .st-key-home_running_title [data-testid="stMarkdownContainer"] p {{ color: {home["title"]} !important; font-weight: 700; }}
+/* ③ 나의 면접 현황: 카드 3개 (아이콘 → 이름 → 숫자 → 설명 칩) */
+.st-key-home_status {{ gap: 16px; }}
+.st-key-home_status [data-testid="stHorizontalBlock"] {{ align-items: stretch; }}  /* 같은 줄 카드 높이 맞춤 */
+.st-key-home_status [data-testid="stColumn"] {{ display: flex; flex-direction: column; }}
+.st-key-home_status [data-testid="stColumn"] > div, .st-key-home_status [data-testid="stLayoutWrapper"]:has(> [class*="st-key-home_stat_"]) {{
+  flex: 1; display: flex; flex-direction: column; }}
+[class*="st-key-home_stat_"] {{ flex: 1; background: {home["card"]}; border: 1px solid {home["line"]}; border-radius: 20px;
+  padding: 24px 22px; gap: 10px; }}
+@media (max-width: 640px) {{  /* 좁은 화면: 세로로 쌓이는 현황 카드를 낮게 (아이콘 · 이름 · 숫자 · 설명) */
+  [class*="st-key-home_stat_"] {{ padding: 16px 18px; gap: 4px; }}
+  .st-key-home_status [class*="st-key-home_stat_"] [data-testid="stMetricValue"] {{ font-size: 1.75rem; }} }}
+[class*="st-key-home_stat_"] span[role="img"] {{ font-size: 28px !important; color: {home["point_text"]}; }}
+[class*="st-key-home_stat_"] [data-testid="stMetricLabel"] p {{ color: {home["title"]} !important; font-size: 1.0625rem; font-weight: 700; }}
+[class*="st-key-home_stat_"] [data-testid="stMetricValue"] {{ color: {home["point_text"]}; font-size: 2.25rem; font-weight: 700; line-height: 1.2; }}
+[class*="st-key-home_stat_"] [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) {{ margin-top: auto; }}  /* 칩은 카드 바닥에 */
+[class*="st-key-home_stat_"] [data-testid="stCaptionContainer"] {{ display: inline-block; width: fit-content; background: {home["chip"]};
+  border-radius: 8px; padding: 5px 10px; opacity: 1; }}  /* Streamlit 캡션 기본 투명도 0.6 → 칩 글자가 흐려져서 1 */
+[class*="st-key-home_stat_"] [data-testid="stCaptionContainer"] p {{ color: {home["text"]} !important; font-size: 0.8125rem;
+  line-height: 1.45; word-break: keep-all; margin: 0; }}
+/* ④ 최근 면접: 카드 없이 줄 목록 */
+.st-key-home_recent_block {{ gap: 12px; }}
+[class*="st-key-home_recent_row_"] {{ border-bottom: 1px solid {home["line"]}; padding: 12px 0; }}
+/* ⑤ 오른쪽 요약 카드: 제목 · 정보 줄 · 점선 · 버튼 (참고: 직무 면접 요약 카드) */
+.st-key-home_side {{ background: {"#1E1F22" if dark else "#FFFFFF"}; border: 1px solid {home["line"]}; border-radius: 24px;
+  padding: 28px 24px 24px; gap: 14px; }}
+.st-key-home_quick_title [data-testid="stMarkdownContainer"] p {{ color: {home["title"]} !important;
+  font-size: 1.375rem; font-weight: 700; line-height: 1.4; letter-spacing: -0.4px; word-break: keep-all; margin: 0; }}
+[class*="st-key-home_quick_row_"] {{ padding: 2px 0; }}
+.st-key-home_quick_title {{ margin-bottom: 6px; }}
+[class*="st-key-home_quick_row_"] p {{ color: {home["text"]} !important; font-size: 0.9375rem; margin: 0; }}
+[class*="st-key-home_quick_row_"] span[role="img"] {{ color: {home["point_text"]}; }}
+[class*="st-key-home_quick_row_"] strong {{ color: {home["title"]}; font-weight: 600; }}
+.st-key-home_quick_buttons {{ border-top: 1px dashed {home["line"]}; padding-top: 18px; margin-top: 4px; gap: 8px; }}
+.st-key-home_quick_buttons button {{ min-height: 52px; border-radius: 12px; font-weight: 700; }}
+/* 기록 0개: 첫 면접 시작 */
+.st-key-home_empty {{ gap: 10px; padding: 0 4px; }}
+.st-key-home_empty .st-key-home_empty_title [data-testid="stMarkdownContainer"] p {{ color: {home["title"]} !important;
+  font-size: 1.375rem; font-weight: 700; margin: 0; }}
+.st-key-home_empty .st-key-home_new button {{ min-height: 52px; padding: 0 28px; border-radius: 12px; }}
 [data-testid="stCode"] .token.important, [data-testid="stCode"] .token.title {{ color: {heading} !important; }}
 [data-testid="stBaseButton-primary"]:hover:not(:disabled),
 [data-testid="stBaseButton-primary"]:focus-visible {{
@@ -67,25 +153,27 @@ def hover_css() -> str:
 [data-testid^="stBaseButton-"]:not([data-testid="stBaseButton-primary"]):not([data-testid$="Active"]):hover:not(:disabled) {{
   background-color: color-mix(in srgb, currentColor 6%, transparent) !important; color: inherit !important; }}
 [data-testid="stTabs"] [role="tab"]:not([aria-selected="true"]):hover {{ color: inherit !important; }}
-/* 평가 탭 회차 태그: 헬스케어(blue 배지)는 하늘색. 테마 blue(진 네이비)와 구분 — 글자색 값으로 찾는다 (config.toml blueTextColor) */
-[data-testid="stExpander"] summary .stMarkdownBadge[style*="color: rgb(16, 37, 107)"],
-.st-key-eval_legend .stMarkdownBadge[style*="color: rgb(16, 37, 107)"],
-.st-key-memo_qcard .stMarkdownBadge[style*="color: rgb(16, 37, 107)"] {{
+/* 평가 탭 회차 태그: 헬스케어(blue 배지)는 하늘색. 테마 blue(브랜드 블루)와 구분 — 글자색 값으로 찾는다 (config.toml blueTextColor) */
+[data-testid="stExpander"] summary .stMarkdownBadge[style*="color: rgb(2, 66, 178)"],
+.st-key-eval_legend .stMarkdownBadge[style*="color: rgb(2, 66, 178)"],
+.st-key-memo_qcard .stMarkdownBadge[style*="color: rgb(2, 66, 178)"] {{
   background-color: #E0F2FE !important; color: #0369A1 !important; }}
-[data-testid="stExpander"] summary .stMarkdownBadge[style*="color: rgb(185, 198, 242)"],
-.st-key-eval_legend .stMarkdownBadge[style*="color: rgb(185, 198, 242)"],
-.st-key-memo_qcard .stMarkdownBadge[style*="color: rgb(185, 198, 242)"] {{
+[data-testid="stExpander"] summary .stMarkdownBadge[style*="color: rgb(169, 198, 255)"],
+.st-key-eval_legend .stMarkdownBadge[style*="color: rgb(169, 198, 255)"],
+.st-key-memo_qcard .stMarkdownBadge[style*="color: rgb(169, 198, 255)"] {{
   background-color: #0B3049 !important; color: #7DD3FC !important; }}
 /* 헤더 아래 간격: Streamlit 기본은 본문 위쪽 여백 96px (헤더 60px + 빈 공간 36px) → 76px (빈 공간 16px).
    헤더가 본문 위에 떠 있어서 60px 보다 줄이면 맨 위 내용이 헤더에 가려진다 */
 [data-testid="stMainBlockContainer"] {{ padding-top: 76px !important; }}
 /* 글자 체계: 당근(about.daangn.com) 줄간격 · 자간 (크기 · 굵기는 config.toml headingFontSizes · headingFontWeights)
-   H1 42/58 · H2 28/42 · H3 20/28 · 본문 16/24, 제목 자간 -0.6px. 좁은 화면에서 H1 은 30px 로 */
+   H1 30 (서비스 안 24~32px) · H2 24 · H3 20/28 · 본문 16/24, 제목 자간 -0.6px. 좁은 화면에서 H1 은 26px 로 */
 [data-testid="stHeading"] h1, [data-testid="stMarkdownContainer"] h1 {{ line-height: 1.38 !important; letter-spacing: -0.6px; }}
 [data-testid="stHeading"] h2, [data-testid="stMarkdownContainer"] h2 {{ line-height: 1.5 !important; letter-spacing: -0.6px; }}
 [data-testid="stHeading"] h3, [data-testid="stMarkdownContainer"] h3 {{ line-height: 1.4 !important; letter-spacing: -0.4px; }}
 [data-testid="stMarkdownContainer"] p {{ line-height: 1.5; }}
-@media (max-width: 640px) {{ [data-testid="stHeading"] h1 {{ font-size: 30px !important; }} }}
+@media (max-width: 640px) {{ [data-testid="stHeading"] h1 {{ font-size: 26px !important; }} }}
+/* 보조 글자: 캡션은 #444D63 (라이트) */
+[data-testid="stCaptionContainer"] {{ color: {"#AEB3C2" if dark else "#444D63"}; }}
 /* 타이틀 화면: 게임 첫 화면처럼 로고 + 메뉴 (색은 위 title 값 · 라이트/다크) */
 .st-key-title_screen {{ background: {title["bg"]}; border: 1px solid {title["border"]};
   border-radius: 16px; padding: 56px 24px 40px; min-height: 72vh; justify-content: center; align-items: center; gap: 12px;
@@ -211,13 +299,15 @@ def hover_css() -> str:
 /* 창 머리: 제목과 '타이틀로' 를 한 줄에, 아래는 구분선 */
 .st-key-start_window > [data-testid="stHorizontalBlock"]:first-child {{ border-bottom: 1px solid var(--st-border-color, rgba(128,128,128,.25)); padding-bottom: 8px; }}
 /* 면접관 소개: 머리줄(persona_head)은 카드 밖, 칸마다 회색 카드(persona_card_줄칸) 2열 (회색 · config.toml grayBackgroundColor 와 같은 값) */
-.st-key-persona_head {{ gap: 2px; }}
+.st-key-persona_head {{ gap: 4px; background: {"#212225" if dark else "#F7F7F8"}; border-radius: 16px; padding: 16px 20px; }}
+.st-key-persona_head [data-testid="stMarkdown"] {{ margin-bottom: 0 !important; }}
+.st-key-persona_head li {{ font-size: 0.9375rem; line-height: 1.6; word-break: keep-all; }}
 .st-key-persona_cards {{ gap: 12px; }}
 .st-key-persona_cards [data-testid="stHorizontalBlock"] {{ align-items: stretch; }}  /* 같은 줄 두 카드 높이 맞춤 */
 .st-key-persona_cards [data-testid="stColumn"] > div {{ height: 100%; }}
-[class*="st-key-persona_card_"] {{ height: 100%; background: {"#292A2D" if dark else "#F4F4F5"}; border-radius: 12px; padding: 14px 18px 18px; }}
+[class*="st-key-persona_card_"] {{ height: 100%; background: {"#292A2D" if dark else "#F5F6F8"}; border-radius: 16px; padding: 14px 18px 18px; }}
 /* 카드 안: 소제목은 작게, 항목은 본문보다 한 단계 작게 (config.toml grayTextColor) */
-[class*="st-key-persona_card_"] p {{ font-size: 0.8rem; font-weight: 600; color: {"#C2C4C8" if dark else "#46474C"}; margin: 0 0 4px; }}
+[class*="st-key-persona_card_"] p {{ font-size: 0.8rem; font-weight: 600; color: {"#C2C4C8" if dark else "#444D63"}; margin: 0 0 4px; }}
 [class*="st-key-persona_card_"] ul {{ margin: 0; padding-left: 1.1rem; }}
 [class*="st-key-persona_card_"] li {{ font-size: 0.875rem; line-height: 1.55; margin: 0 0 2px; word-break: keep-all; }}
 [class*="st-key-persona_card_"] li:last-child {{ margin-bottom: 0; }}
@@ -235,12 +325,26 @@ def hover_css() -> str:
 .st-key-memo_qcard [data-testid="stColumn"]:nth-child(2) [data-testid="stCaptionContainer"] {{ text-align: center; }}
 .st-key-memo_qcard h4 {{ text-align: center; word-break: keep-all; }}
 .st-key-memo_qcard [data-testid="stMarkdownContainer"] p:has(> .stMarkdownBadge) {{ text-align: center; }}  /* 공통 · 분야 질문 태그 */  /* 한국어는 어절 단위로 줄바꿈 */
-/* 면접 완료 안내 (show_interview_done): 브랜드 블루 왼쪽 선 · 옅은 바탕. 아래로 내릴 때 입력창 자리만큼 여백 */
+/* 면접 완료 안내 (show_interview_done): 옅은 브랜드 블루 바탕 (강조 선 없음) · 주요 카드 모서리 20. 아래로 내릴 때 입력창 자리만큼 여백 */
 .st-key-interview_done {{ background: {"rgba(61, 123, 255, 0.12)" if dark else "#F5F8FE"};
-  border: 1px solid {"rgba(141, 180, 255, 0.22)" if dark else "#E6E9F0"}; border-left: 4px solid {"#8DB4FF" if dark else "#0252DE"};
-  border-radius: 16px; padding: 20px 24px; gap: 8px; margin-top: 8px; scroll-margin-bottom: 48px; }}
+  border: 1px solid {"rgba(141, 180, 255, 0.22)" if dark else "#E6E9F0"};
+  border-radius: 20px; padding: 20px 24px; gap: 8px; margin-top: 8px; scroll-margin-bottom: 48px; }}
 .st-key-interview_done [data-testid="stMarkdown"] {{ margin-bottom: 0 !important; }}
 .st-key-interview_done button [data-testid="stMarkdownContainer"] p {{ color: inherit !important; }}
+/* ── 디자인 시스템 공통 (prd/design.md) ──
+   테두리 칸(st.container(border=True)) 모서리 16, 펼침 칸 · 안내 상자 12 (Streamlit 기본 8).
+   키를 단 칸(.st-key-*)은 각자 정한 모양 그대로 둔다. 바탕 · 테두리가 없는 칸은 모서리가 보이지 않아 영향 없음 */
+[data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"]:not([class*="st-key-"]) {{ border-radius: 16px; }}
+[data-testid="stExpander"] details, [data-testid="stExpander"] summary {{ border-radius: 12px; }}
+[data-testid="stAlertContainer"] {{ border-radius: 12px; }}
+/* 구분선 위아래 32 → 24 (기록 · 평가 화면의 정보 밀도) */
+[data-testid="stMainBlockContainer"] hr {{ margin: 24px 0; }}
+/* 면접 상세(평가 · 면접 기록 · 재도전)와 상태창: 큰 숫자 36 → 28px (질문 · 답 · 평가 글에 집중) */
+[data-testid="stMainBlockContainer"]:has(.st-key-lnb) [data-testid="stMetricValue"],
+[data-testid="stSidebar"] [data-testid="stMetricValue"] {{ font-size: 1.75rem; }}
+/* 평가 리포트 가독성: 펼침 칸 안 글 줄간격 1.6, 한국어 어절 단위 줄바꿈 */
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] li {{ line-height: 1.6; word-break: keep-all; }}
 </style>"""
 
 
@@ -350,14 +454,17 @@ GNB = [("home", ":material/home: 홈"), ("coaching", ":material/forum: 면접 �
 ROUND_WIDGET_PREFIXES = ("retry_answer_", "hl_", "eval_retry_", "clue_retry_", "strategy_", "pending_edit", "retry_no",
                          "eval_rounds", "perfect_hints")
 SESSION_ONLY_KEYS = ("highlights", "strategies")  # 회차마다 세션 안에서만 (파일에 남기지 않는다)
-NICK_FIRST = ["용감한", "차분한", "꼼꼼한", "부지런한", "단단한", "유쾌한", "성실한", "든든한"]
-NICK_SECOND = ["지원자", "디자이너", "개발자", "기획자", "도전자", "준비생"]
+# 닉네임: 긴장을 덜어 주는 긍정적인 수식어 + 동물 + 세 자리 숫자 (직군 이름 · 부정적인 표현은 쓰지 않는다)
+NICK_MODIFIERS = ["합격을 예감한", "당당한 척 잘하는", "오늘도 성장하는", "기회를 낚아채는", "내일이 기대되는",
+                  "자신감을 충전한", "출근을 꿈꾸는", "역전을 준비하는", "꿈을 향해 달리는", "칭찬에 춤추는"]
+NICK_ANIMALS = ["토끼", "수달", "판다", "펭귄", "쿼카", "햄스터", "고양이", "다람쥐", "여우", "고래", "부엉이", "사슴"]
 
 
 def new_nickname() -> str:
-    """시작 화면의 닉네임 자동 생성 (홈에서 바꿀 수 있다). 개인정보가 아닌 임의 이름."""
+    """시작 화면의 닉네임 자동 생성 (예: 합격을 예감한 토끼 183). 처음 접속할 때만 만들고, 정해진 닉네임은 바꾸지 않는다.
+    개인정보가 아닌 임의 이름 (홈에서 바꿀 수 있다)."""
     import random
-    return f"{random.choice(NICK_FIRST)} {random.choice(NICK_SECOND)} {random.randint(100, 999)}"
+    return f"{random.choice(NICK_MODIFIERS)} {random.choice(NICK_ANIMALS)} {random.randint(100, 999)}"
 
 
 def reset_app():
@@ -1000,7 +1107,7 @@ def show_retry_result(no: int, ev: dict, index: int, place: str, celebrate: bool
         {"전": [r["전"] for r in diff["rows"]], "후": [r["후"] for r in diff["rows"]]},
         index=[r["기준"] for r in diff["rows"]],
     )
-    st.bar_chart(chart, stack=False, y_label="점수 (0~5)", color=["#C2C4C8", "#4263D6"], height=240)
+    st.bar_chart(chart, stack=False, y_label="점수 (0~5)", color=["#C2C4C8", "#0252DE"], height=240)
     st.table(diff["rows"], hide_index=True)
     st.markdown(f"**이번 답의 약한 점:** {result['weak']}")
     ai_note("점수 차이는 앱이 계산했고, 약한 점은 AI가 쓴 의견")
@@ -1195,9 +1302,9 @@ VERDICT_CSS = """<style>
   line-height: 1.6; word-break: keep-all; box-shadow: 0 1px 2px rgba(23, 23, 25, .04); animation: vd-in .3s ease-out 3s both; }
 .vd-mail-bar { display: flex; align-items: center; gap: 8px; padding: 10px 24px; background: #F7F7F8;
   border-bottom: 1px solid #EAEBEC; color: #70737C; font-size: .8125rem; }
-.vd-dot { width: 8px; height: 8px; border-radius: 4px; background: #10256B; }
+.vd-dot { width: 8px; height: 8px; border-radius: 4px; background: #0252DE; }
 .vd-mail-head { display: flex; align-items: center; gap: 12px; padding: 20px 24px 0; }
-.vd-avatar { flex: 0 0 40px; height: 40px; border-radius: 20px; background: #10256B; color: #FFFFFF;
+.vd-avatar { flex: 0 0 40px; height: 40px; border-radius: 20px; background: #0252DE; color: #FFFFFF;
   display: grid; place-items: center; font-weight: 600; }
 .vd-sender { flex: 1; min-width: 0; line-height: 1.4; }
 .vd-sender b { display: block; font-weight: 600; font-size: .9375rem; }
@@ -1211,9 +1318,9 @@ VERDICT_CSS = """<style>
 .vd-status.more { background: #FFF5F5; border-color: #F8CFCF; }
 .vd-pill { display: inline-block; font-size: .75rem; font-weight: 600; color: #FFFFFF; border-radius: 999px;
   padding: 2px 10px; margin-bottom: 8px; }
-.pass .vd-pill { background: #006E25; } .candidate .vd-pill { background: #10256B; } .more .vd-pill { background: #B00C0C; }
+.pass .vd-pill { background: #006E25; } .candidate .vd-pill { background: #0252DE; } .more .vd-pill { background: #B00C0C; }
 .vd-result { font-size: 1.125rem; font-weight: 600; line-height: 1.4; margin-bottom: 6px; word-break: keep-all; }
-.pass .vd-result { color: #006E25; } .candidate .vd-result { color: #10256B; } .more .vd-result { color: #B00C0C; }
+.pass .vd-result { color: #006E25; } .candidate .vd-result { color: #0252DE; } .more .vd-result { color: #B00C0C; }
 .vd-status p { margin: 0; color: #46474C; }
 .vd-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 20px; }
 .vd-stat { border: 1px solid #EAEBEC; border-radius: 12px; padding: 12px 14px; }
@@ -1223,7 +1330,7 @@ VERDICT_CSS = """<style>
 .vd-stat small { color: #70737C; font-size: .8125rem; }
 .vd-sign { color: #46474C; }
 .vd-tip { border: 1px solid #CDD5EE; background: #F3F5FB; border-radius: 12px; padding: 14px 18px; margin-bottom: 20px; }
-.vd-tip b { color: #10256B; font-weight: 600; }
+.vd-tip b { color: #0252DE; font-weight: 600; }
 .vd-tip p { margin: 4px 0 0; color: #46474C; }
 .vd-foot { background: #F7F7F8; border-top: 1px solid #EAEBEC; padding: 14px 24px; color: #70737C; font-size: .75rem; }
 .vd-foot p { margin: 0; }
@@ -1678,65 +1785,169 @@ def page_start():
                     with st.container(key="splash_sub"):
                         st.markdown("합격을 향한 전세역전(戰勢逆轉) 취업 코칭 서비스")
             with st.container(key="title_body"):
-                st.markdown(f"반가워요, **{html.escape(state.nickname)}** 님. 닉네임은 홈에서 바꿀 수 있어요.")
+                st.markdown(f"반가워요, **{html.escape(state.nickname)}** 님.")
                 with st.container(key="title_menu"):
                     st.button(":material/add: 새 면접 시작", key="title_new", type="primary", width="stretch",
                               on_click=open_setup)
                     st.button(":material/upload_file: 기존 데이터 Markdown 복원", key="title_resume", width="stretch",
                               on_click=start_to, args=("restore",))
-                    st.button(":material/home: 홈", key="title_home", width="stretch", on_click=start_to, args=("home",))
 
 
 # ── GNB 1 · 홈 ────────────────────────────────────────────────
-def set_nickname():
-    name = " ".join(str(state.get("nickname_input", "")).split())[:MAX_NICKNAME_CHARS]
-    if name:
-        state.nickname = name
-
-
 MAX_NICKNAME_CHARS = 20
 
 
-def page_home():
-    st.title("홈")
-    state.setdefault("nickname_input", state.nickname)
-    st.text_input("닉네임", key="nickname_input", max_chars=MAX_NICKNAME_CHARS, on_change=set_nickname,
-                  help="자동으로 만든 닉네임이에요. 바꾸면 면접 인사 · 저장 파일에 이 이름이 들어가요.")
-    rounds = all_rounds()
-    groups = {(r.get("company_key"), r["job"]) for r in rounds}
-    running = [r for r in rounds if r.get("stage") == "interview"]
-    a, b, c = st.columns(3)
-    a.metric("회사 · 직군", len(groups))
-    b.metric("면접 회차", len(rounds))
-    c.metric("진행 중 면접", len(running))
-    st.subheader("바로 가기")
-    with st.container(horizontal=True, gap="small"):
-        st.button(":material/add: 새 면접 시작", key="home_new", type="primary", on_click=open_setup)
-        st.button(":material/forum: 면접 기록 보기", key="home_records", on_click=go_page, args=("coaching",))
-        if st.button(":material/save: 데이터 저장하기", key="home_save"):
-            save_dialog()
-        st.button(":material/upload_file: Markdown 복원", key="home_restore", on_click=go_page, args=("restore",))
-    for record in running:
-        with st.container(border=True):
-            st.markdown(f"**{group_label(record.get('company_key'))} · {record['job']} · {record['round_number']}회차** 면접 진행 중 "
-                        f"(질문 {min(record.get('q_index', 0) + 1, coach.TOTAL_QUESTIONS)}/{coach.TOTAL_QUESTIONS})")
-            if st.button("이어서 하기", key=f"home_resume_{record['round_id']}"):
-                load_round(record["round_id"])
-                state.page = "interview"
-                st.rerun()
-    done = [r for r in rounds if r.get("stage") == "done"]
-    if done:
-        st.subheader("최근 면접")
-        for record in sorted(done, key=lambda r: r.get("date", ""), reverse=True)[:5]:
-            first, latest = round_totals(record)
-            score = f" · 최신 종합 {latest}/{coach.TOTAL_MAX}" if latest is not None else ""
-            if st.button(f"{group_label(record.get('company_key'))} · {record['job']} · {round_label(record)}{score}",
-                         key=f"home_round_{record['round_id']}", width="stretch"):
-                open_round(record["round_id"], LNB_EVAL)
-                st.rerun()
-    elif not rounds:
-        st.info("아직 면접 기록이 없어요. '새 면접 시작' 으로 첫 면접을 하거나, 받아 둔 기록 파일을 'Markdown 복원' 에서 올려 주세요.")
+def open_nickname_edit():
+    state.nickname_editing = True
+    state.nickname_input = state.nickname  # 수정 칸은 지금 닉네임으로 채워서 연다
 
+
+def save_nickname():
+    """[닉네임 수정] → 저장. 빈칸이면 바꾸지 않는다 (공백은 하나로)."""
+    name = " ".join(str(state.get("nickname_input", "")).split())[:MAX_NICKNAME_CHARS]
+    if name:
+        state.nickname = name
+    state.nickname_editing = False
+
+
+def cancel_nickname():
+    state.nickname_editing = False
+
+
+def show_welcome():
+    """① 인사 (히어로 판): 닉네임은 글로만, [닉네임 수정] 은 작은 보조 버튼 (평소에는 입력칸을 숨긴다)."""
+    with st.container(key="home_welcome", horizontal=True, vertical_alignment="center"):
+        with st.container(key="home_hero_text"):
+            with st.container(key="home_hero_copy"):
+                with st.container(key="home_hello"):
+                    st.markdown(f"반가워요, {html.escape(state.nickname)} 님!")
+                with st.container(key="home_sub"):
+                    st.markdown("오늘도 합격을 향해 한 걸음 나아가 볼까요?")
+            if not state.get("nickname_editing"):
+                st.button("닉네임 수정", key="nickname_edit", type="secondary", icon=":material/edit:",
+                          on_click=open_nickname_edit)
+            if state.get("nickname_editing"):
+                st.text_input("닉네임", key="nickname_input", max_chars=MAX_NICKNAME_CHARS,
+                              help="면접 인사 · 저장 파일에 이 이름이 들어가요.")
+                with st.container(horizontal=True, gap="small"):
+                    st.button("저장", key="nickname_save", type="primary", on_click=save_nickname)
+                    st.button("취소", key="nickname_cancel", on_click=cancel_nickname)
+
+
+def resume_interview(round_id: str):
+    """진행 중인 회차로 돌아간다 (새 회차를 만들거나 진행 상태를 바꾸지 않는다)."""
+    load_round(round_id)
+    state.page = "interview"
+    state.page_top = True
+
+
+def show_running(running: list[dict]):
+    """② 진행 중인 면접: 있을 때만, 현황보다 위에. [이어서 하기] 는 그 회차로 돌아간다."""
+    if not running:
+        return
+    with st.container(key="home_running"):
+        with st.container(key="home_running_title"):
+            st.markdown(":material/play_circle: 진행 중인 면접")
+        for record in running:
+            question = min(record.get("q_index", 0) + 1, coach.TOTAL_QUESTIONS)
+            info_col, button_col = st.columns([3, 1], vertical_alignment="center")
+            info_col.markdown(f"**{group_label(record.get('company_key'))} · {record['job']} · {record['round_number']}회차**  \n"
+                              f"질문 {question} / {coach.TOTAL_QUESTIONS}")
+            button_col.button("이어서 하기", key=f"home_resume_{record['round_id']}", type="primary", width="stretch",
+                              on_click=resume_interview, args=(record["round_id"],))
+
+
+def show_status(rounds: list[dict]):
+    """③ 나의 면접 현황: 면접 기록 = 회차 수 = 완료한 면접 + 진행 중인 면접.
+    완료 = 질문 5개를 마친 회차 (평가 전 회차 · 옛 리포트 요약 회차 포함), 진행 중 = 질문 5개를 마치기 전 회차."""
+    done = [r for r in rounds if r.get("stage") in ("done", "summary")]
+    running = [r for r in rounds if r.get("stage") == "interview"]
+    evaluated = sum(1 for r in done if r.get("evaluation"))
+    cards = [(":material/folder_open:", "면접 기록", len(rounds), "전체 회차"),
+             (":material/task_alt:", "완료한 면접", len(done), f"질문 5개 완료 · 그중 평가 완료 {evaluated}"),
+             (":material/pending:", "진행 중인 면접", len(running), "질문 5개를 마치기 전")]
+    with st.container(key="home_status"):
+        st.subheader("나의 면접 현황")
+        for i, (column, (icon, label, value, note)) in enumerate(zip(st.columns(3), cards)):
+            with column.container(key=f"home_stat_{i}"):
+                st.markdown(icon)
+                st.metric(label, value)
+                st.caption(note)
+
+
+HOME_RECENT = 3  # 홈의 최근 면접 목록 개수
+
+
+def open_recent_round(round_id: str):
+    """최근 면접 → 그 회차의 면접 기록 확인 화면 ([평가 확인하기] 와 같은 곳)."""
+    load_round(round_id)
+    go_round_record()
+
+
+def show_recent(rounds: list[dict]):
+    """④ 최근 면접: 질문 5개를 마친 회차 중 최근 HOME_RECENT 개 (날짜가 같으면 나중에 만든 회차가 위)."""
+    done = [r for r in rounds if r.get("stage") in ("done", "summary")]
+    if not done:
+        return
+    recent = [r for _, r in sorted(enumerate(done), key=lambda p: (p[1].get("date") or "", p[0]), reverse=True)]
+    with st.container(key="home_recent_block"):
+        st.subheader("최근 면접")
+        with st.container(key="home_recent", gap=None):
+            for record in recent[:HOME_RECENT]:
+                first, latest = round_totals(record)
+                score = f" · 종합 {latest}/{coach.TOTAL_MAX}" if latest is not None else ""
+                with st.container(key=f"home_recent_row_{record['round_id']}"):
+                    info_col, button_col = st.columns([4, 1], vertical_alignment="center")
+                    info_col.markdown(f"**{group_label(record.get('company_key'))} · {record['job']} · {record['round_number']}회차**  \n"
+                                      f":gray[{record.get('date', '')} · {coach.round_status(record)}{score}]")
+                    button_col.button("기록 보기", key=f"home_round_{record['round_id']}", type="tertiary",
+                                      icon=":material/chevron_right:", icon_position="right", width="stretch",
+                                      on_click=open_recent_round, args=(record["round_id"],))
+
+
+def show_quick_start():
+    """⑤ 빠른 시작 (오른쪽 요약 카드): 면접 진행 방식 요약 + 버튼. 저장 · 복원은 위쪽 GNB 에 있어 다시 보여 주지 않는다."""
+    rows = [(":material/chat:", "질문 수", f"{coach.TOTAL_QUESTIONS}문항"),
+            (":material/subdirectory_arrow_right:", "꼬리 질문", f"질문당 최대 {coach.MAX_FOLLOW_UPS}개"),
+            (":material/groups:", "평가", "위원 4명")]
+    with st.container(key="home_side"):
+        with st.container(key="home_quick_title"):
+            st.markdown("새로운 면접을 준비해 볼까요?")
+        for i, (icon, label, value) in enumerate(rows):
+            with st.container(key=f"home_quick_row_{i}", horizontal=True, horizontal_alignment="distribute",
+                              vertical_alignment="center"):
+                st.markdown(f"{icon} {label}", width="content")
+                st.markdown(f"**{value}**", width="content")
+        with st.container(key="home_quick_buttons"):
+            st.button(":material/add: 새 면접 시작", key="home_new", type="primary", width="stretch", on_click=open_setup)
+            st.button(":material/forum: 면접 기록 보기", key="home_records", width="stretch", on_click=go_page, args=("coaching",))
+
+
+def show_first_start():
+    """기록 0개: 0 만 반복되는 현황 대신 첫 면접 시작을 크게. 복원은 위쪽 GNB 'Markdown 복원' 에서 그대로."""
+    with st.container(key="home_empty"):
+        with st.container(key="home_empty_title"):
+            st.markdown("첫 모의면접을 시작해 볼까요?")
+        st.caption("직군과 회사를 고르면 질문 5개로 바로 시작해요. 받아 둔 기록 파일이 있으면 위쪽 'Markdown 복원' 에서 올려 주세요.")
+        st.button(":material/add: 첫 면접 시작하기", key="home_new", type="primary", on_click=open_setup)
+
+
+def page_home():
+    """GNB 1 홈: ① 인사 (히어로) → (기록 0개) 첫 면접 시작
+    / (기록 있음) 2열 [② 진행 중인 면접 (있을 때만) → ③ 나의 면접 현황 → ④ 최근 면접 | ⑤ 빠른 시작 요약 카드]."""
+    rounds = all_rounds()
+    with st.container(key="home_page"):
+        show_welcome()
+        if not rounds:
+            show_first_start()
+            return
+        main_col, side_col = st.columns([2, 1], gap="large")
+        with main_col.container(key="home_main"):
+            show_running([r for r in rounds if r.get("stage") == "interview"])
+            show_status(rounds)
+            show_recent(rounds)
+        with side_col:
+            show_quick_start()
 
 # ── 면접 정보 설정 (파란 흐름) ─────────────────────────────────────
 def job_fields(bank: pd.DataFrame, job: str) -> list[str]:
@@ -1748,23 +1959,28 @@ def job_fields(bank: pd.DataFrame, job: str) -> list[str]:
 def show_interviewer(job: str):
     """직군 대표 면접관 소개 (자동 배정 · 고르지 않는다). 평가는 면접이 끝난 뒤 위원 4명이 따로 한다."""
     ptype = (coach.persona_type_names(job) or [None])[0]
-    lines = coach.persona_lines(job, ptype)
+    brief = coach.persona_brief(job, ptype)
+    # 기본 소개: 4개 직군 같은 구조 (직책 · 경력 / 성격 · 질문 성향 / 핵심 평가 역량 / 진행 방식)
     with st.container(key="persona_head"):
-        st.markdown(f":material/support_agent: **{ptype or job + ' 면접관'}** · {lines[0]}" if lines else f"**{job} 면접관**")
-        st.caption(f":material/forum: 면접관 1명이 질문 5개를 진행하고, 답이 부족하면 꼬리 질문을 한 번 더 해요 (질문마다 {coach.MAX_FOLLOW_UPS}개까지). "
-                   "면접 중에는 평가 · 코칭을 하지 않고, 끝난 뒤 위원 4명이 평가해요.")
+        st.markdown(f":material/support_agent: **{ptype or job + ' 면접관'}** · {brief['role']}")
+        rows = [("성격 · 질문 성향", brief["tone"]),
+                ("핵심 평가 역량", " · ".join(brief["skills"][:coach.PERSONA_BRIEF_SKILLS])),
+                ("면접 진행 방식", f"{brief['style']}. 면접 중에는 평가하지 않고, 끝난 뒤 위원 4명이 평가해요.")]
+        st.markdown("\n".join(f"- **{label}** · {value}" for label, value in rows if value))
+    # 상세: 기존 소개 그대로 (디자인은 소개 카드, 나머지 직군은 페르소나 글 전체)
     card = PERSONA_CARDS.get(job, {}).get(ptype)
-    if not card and lines[1:]:
-        st.caption("  \n".join(lines[1:]))
-    if card:
-        left_titles = [t for t in ("성격", "주목하는 인재상") if t in card]
-        right_titles = [t for t in card if t not in left_titles]
-        with st.container(key="persona_cards"):
-            for row, pair in enumerate(itertools.zip_longest(left_titles, right_titles)):
-                for side, (column, title) in enumerate(zip(st.columns(2, gap="small"), pair)):
-                    if title:
-                        with column.container(key=f"persona_card_{row}{side}"):
-                            st.markdown(f"**{title}**\n" + "\n".join(f"- {item}" for item in card[title]))
+    with st.expander("면접관 자세히 보기", icon=":material/badge:"):
+        if card:
+            left_titles = [t for t in ("성격", "주목하는 인재상") if t in card]
+            right_titles = [t for t in card if t not in left_titles]
+            with st.container(key="persona_cards"):
+                for row, pair in enumerate(itertools.zip_longest(left_titles, right_titles)):
+                    for side, (column, title) in enumerate(zip(st.columns(2, gap="small"), pair)):
+                        if title:
+                            with column.container(key=f"persona_card_{row}{side}"):
+                                st.markdown(f"**{title}**\n" + "\n".join(f"- {item}" for item in card[title]))
+        else:
+            st.markdown("\n".join(f"- {line}" for line in coach.persona_lines(job, ptype)))
 
 
 def page_setup():
@@ -1990,7 +2206,7 @@ def page_coaching():
         return
     key, job = group["key"], group["job"]
     rounds = coach.group_rounds(all_rounds(), key, job)
-    head_col, back_col = st.columns([4, 1], vertical_alignment="center")
+    head_col, back_col = st.columns([3, 2], vertical_alignment="center")
     head_col.title(f"{group_label(key)} · {job}")
     if back_col.button(":material/list: 면접 데이터 목록", key="back_to_list", width="stretch"):
         state.coach_group = None
@@ -2225,6 +2441,11 @@ if state.pop("open_next_round", False) and active_round():  # 모의 결과의 '
     record = active_round()
     open_setup(record.get("company_name") or "", record["job"], record.get("company_desc") or "")
     state.f_type = "field"
+
+# 화면 검토 모드 (가짜 AI): 검토용 실행기가 llm.REVIEW_FAKE_AI 를 켰을 때만. 운영에서는 이 이름이 없어 보이지 않는다.
+if getattr(llm, "REVIEW_FAKE_AI", False):
+    st.warning("화면 검토 모드예요. 가짜 AI 가 정해 둔 문장으로 답해요. 꼬리 질문 · 평가 글은 실제 AI 결과가 아니에요.",
+               icon=":material/science:")
 
 if state.page == "start":
     page_start()
